@@ -1,9 +1,19 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
+    // 설정(Settings) 규칙: 누구나 읽을 수 있고, 지정된 관리자 UID만 쓰기 권한을 가짐
     match /school_settings/{document=**} {
       allow read: if true;
-      allow write: if request.auth != null && request.auth.uid == 'U2qTJ1dAQXfAiOZ3knMmujGSqKU2';
+      allow write: if request.auth != null && (
+        request.auth.uid == 'U2qTJ1dAQXfAiOZ3knMmujGSqKU2' || 
+        request.auth.uid == 'Tu0UHRz4flZDndTWshxDI8DKFVn2' ||
+        request.auth.token.email == 'netsci10@gmail.com'
+      );
+    }
+
+    // 예약(Reservations) 규칙: 누구나 읽고 쓰기 가능 (로그인 없이 예약 가능하도록 조건 완전 개방)
+    match /school_reservations/{document=**} {
+      allow read, write: if true;
     }
   }
 }

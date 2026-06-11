@@ -39,7 +39,9 @@ import {
   MapPin,
   Mail,
   AlertCircle,
-  BookOpen
+  BookOpen,
+  Edit2,
+  ArrowLeft
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 
@@ -85,6 +87,7 @@ interface AppSettings {
   specialRooms: string[];
   classes: string[];
   periods: Period[];
+  roomsPerRow?: number;
 }
 
 interface Reservation {
@@ -143,7 +146,8 @@ const defaultSettings: AppSettings = {
     { id: 5, name: "5교시", startTime: "13:00", endTime: "13:40", allowed: true },
     { id: 6, name: "6교시", startTime: "13:50", endTime: "14:30", allowed: true },
     { id: 7, name: "7교시", startTime: "14:40", endTime: "15:20", allowed: false }
-  ]
+  ],
+  roomsPerRow: 3
 };
 
 // ==========================================
@@ -213,15 +217,41 @@ export default function App() {
   const [formTeacher, setFormTeacher] = useState<string>('');
   const [formMemo, setFormMemo] = useState<string>('');
 
+  // 메인 예약 현황 보드에서 현재 선택된 특별실 (null 일 때 전체 리스트 카드 표출)
+  const [selectedBoardRoom, setSelectedBoardRoom] = useState<string | null>(null);
+
+  // 예약 신청 모달 내부 유효성 검사 및 에러 노출용 상태
+  const [formValidationError, setFormValidationError] = useState<string | null>(null);
+  // 예외/알림 전체를 비차단(Non-blocking) 토스트 형태로 띄울 상태
+  const [toastMessage, setToastMessage] = useState<{ text: string; type: 'error' | 'success' } | null>(null);
+  // 커스텀 리액트 기반 삭제 검증 모달 상태
+  const [deleteConfirmTarget, setDeleteConfirmTarget] = useState<{ room: string; periodId: number; res?: Reservation } | null>(null);
+
   // 설정 편집용 로컬 상태
   const [editGeneral, setEditGeneral] = useState({
     appName: '',
     appDescription: '',
     copyright: '',
-    contactEmail: ''
+    contactEmail: '',
+    roomsPerRow: 3 as number
   });
   const [newRoomInput, setNewRoomInput] = useState<string>('');
+  const [editingRoom, setEditingRoom] = useState<string | null>(null);
+  const [editingRoomNameInput, setEditingRoomNameInput] = useState<string>('');
   const [newClassInput, setNewClassInput] = useState<string>('');
+  const [editingClass, setEditingClass] = useState<string | null>(null);
+  const [editingClassNameInput, setEditingClassNameInput] = useState<string>('');
+
+  // 기본 일과 편집용 로컬 상태
+  const [newPeriodName, setNewPeriodName] = useState<string>('');
+  const [newPeriodStartTime, setNewPeriodStartTime] = useState<string>('09:00');
+  const [newPeriodEndTime, setNewPeriodEndTime] = useState<string>('09:40');
+
+  // 기존 일과 온라인/인라인 편집 제어용 상태
+  const [editingPeriodId, setEditingPeriodId] = useState<number | null>(null);
+  const [editingPeriodNameInput, setEditingPeriodNameInput] = useState<string>('');
+  const [editingPeriodStartTimeInput, setEditingPeriodStartTimeInput] = useState<string>('');
+  const [editingPeriodEndTimeInput, setEditingPeriodEndTimeInput] = useState<string>('');
 
   // 캘린더 연월 이동 상태
   const [calendarMonth, setCalendarMonth] = useState<Date>(new Date());
@@ -280,12 +310,15 @@ export default function App() {
 
   // 3. Real-time Config Sync (Firestore -> React State)
   useEffect(() => {
-    const settingsRef = doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'config');
+    const settingsRef = doc(db, 'school_settings', 'config');
     setSettingsLoading(true);
 
     const unsub = onSnapshot(settingsRef, (docSnap) => {
       if (docSnap.exists()) {
         const data = docSnap.data() as AppSettings;
+        const incomingPeriods = data.periods || defaultSettings.periods;
+        const sortedPeriods = [...incomingPeriods].sort((a, b) => a.startTime.localeCompare(b.startTime));
+        
         setSettings({
           appName: data.appName || defaultSettings.appName,
           appDescription: data.appDescription || defaultSettings.appDescription,
@@ -293,14 +326,16 @@ export default function App() {
           contactEmail: data.contactEmail || defaultSettings.contactEmail,
           specialRooms: data.specialRooms || defaultSettings.specialRooms,
           classes: data.classes || defaultSettings.classes,
-          periods: data.periods || defaultSettings.periods
+          periods: sortedPeriods,
+          roomsPerRow: data.roomsPerRow || defaultSettings.roomsPerRow || 3
         });
 
         setEditGeneral({
           appName: data.appName || defaultSettings.appName,
           appDescription: data.appDescription || defaultSettings.appDescription,
           copyright: data.copyright || defaultSettings.copyright,
-          contactEmail: data.contactEmail || defaultSettings.contactEmail
+          contactEmail: data.contactEmail || defaultSettings.contactEmail,
+          roomsPerRow: data.roomsPerRow || defaultSettings.roomsPerRow || 3
         });
       } else {
         // 아직 Firestore 데이터가 없을 때 로컬 기본값 적용 후, 관리자 로그인을 통한 데이터 저장을 지원
@@ -309,7 +344,8 @@ export default function App() {
           appName: defaultSettings.appName,
           appDescription: defaultSettings.appDescription,
           copyright: defaultSettings.copyright,
-          contactEmail: defaultSettings.contactEmail
+          contactEmail: defaultSettings.contactEmail,
+          roomsPerRow: defaultSettings.roomsPerRow || 3
         });
       }
       setSettingsLoading(false);
@@ -326,7 +362,7 @@ export default function App() {
   // 4. Real-time Reservations Sync for specific Date
   useEffect(() => {
     setDailyLoading(true);
-    const reservationsRef = doc(db, 'artifacts', appId, 'public', 'data', 'reservations', selectedDateStr);
+    const reservationsRef = doc(db, 'school_reservations', selectedDateStr);
 
     const unsub = onSnapshot(reservationsRef, (docSnap) => {
       if (docSnap.exists()) {
@@ -336,7 +372,7 @@ export default function App() {
       }
       setDailyLoading(false);
     }, (error) => {
-      handleFirestoreError(error, OperationType.GET, `reservations/${selectedDateStr}`);
+      handleFirestoreError(error, OperationType.GET, `school_reservations/${selectedDateStr}`);
       setDailyLoading(false);
     });
 
@@ -345,7 +381,7 @@ export default function App() {
 
   // 5. Real-time Monthly Reservation Status (가벼운 전수 달력 도트 마킹용)
   useEffect(() => {
-    const resColl = collection(db, 'artifacts', appId, 'public', 'data', 'reservations');
+    const resColl = collection(db, 'school_reservations');
     const unsub = onSnapshot(resColl, (querySnap) => {
       const mapped: Record<string, boolean> = {};
       querySnap.forEach((docSnap) => {
@@ -458,9 +494,18 @@ export default function App() {
   // ------------------------------------------
   // 특별실 예약 등록 및 취소 액션 (Reservation Logic)
   // ------------------------------------------
+  const showToast = (text: string, type: 'error' | 'success' = 'success') => {
+    setToastMessage({ text, type });
+    setTimeout(() => {
+      setToastMessage(null);
+    }, 3500);
+  };
+
   const openBookingForm = (room: string, period: Period) => {
     const compoundKey = `${room}_${period.id}`;
     const existing = dailyReservations[compoundKey];
+
+    setFormValidationError(null);
 
     if (existing) {
       // 기존 예약이 있다면 상세 모달 표출
@@ -476,21 +521,24 @@ export default function App() {
 
   const saveReservation = async () => {
     if (!activeBookingCell) return;
+    setFormValidationError(null);
     if (!formTeacher.trim()) {
-      alert("예약하시는 분(교사명)을 입력해주세요.");
+      setFormValidationError("예약하시는 분(교사 성함)을 정확히 기입해 주세요.");
       return;
     }
 
     setIsSaving(true);
     const compoundKey = `${activeBookingCell.room}_${activeBookingCell.period.id}`;
+    const existingRes = dailyReservations[compoundKey];
+    const isEdit = !!existingRes;
     
     const newReservation: Reservation = {
       teacherClass: formClass,
       teacherName: formTeacher.trim(),
       memo: formMemo.trim(),
-      reservedByUid: currentUser?.uid || 'anonymous',
-      reservedByName: currentUser?.displayName || '익명교사',
-      createdAt: new Date().toISOString()
+      reservedByUid: existingRes?.reservedByUid || currentUser?.uid || 'anonymous',
+      reservedByName: existingRes?.reservedByName || currentUser?.displayName || '익명교사',
+      createdAt: existingRes?.createdAt || new Date().toISOString()
     };
 
     const updatedReservations = {
@@ -498,69 +546,99 @@ export default function App() {
       [compoundKey]: newReservation
     };
 
-    const resPath = `reservations/${selectedDateStr}`;
+    const resPath = `school_reservations/${selectedDateStr}`;
     try {
-      const resDocRef = doc(db, 'artifacts', appId, 'public', 'data', 'reservations', selectedDateStr);
+      const resDocRef = doc(db, 'school_reservations', selectedDateStr);
       await setDoc(resDocRef, { reservations: updatedReservations }, { merge: true });
       setActiveBookingCell(null);
-    } catch (error) {
+      showToast(isEdit ? "예약이 성공적으로 수정되었습니다." : "예약이 정상적으로 등록되었습니다!", "success");
+    } catch (error: any) {
+      console.error("예약 저장 에러:", error);
+      setFormValidationError("예약 저장에 실패했습니다. (서버 보안 규칙 또는 일시적인 권한 문제)");
       handleFirestoreError(error, OperationType.WRITE, resPath);
     } finally {
       setIsSaving(false);
     }
   };
 
-  const cancelReservation = async (room: string, periodId: number) => {
-    if (!confirm("정말 이 예약을 취소하시겠습니까?")) return;
-
+  const executeCancelReservation = async (room: string, periodId: number) => {
     setIsSaving(true);
     const compoundKey = `${room}_${periodId}`;
     
     const updated = { ...dailyReservations };
     delete updated[compoundKey];
 
-    const resPath = `reservations/${selectedDateStr}`;
+    const resPath = `school_reservations/${selectedDateStr}`;
     try {
-      const resDocRef = doc(db, 'artifacts', appId, 'public', 'data', 'reservations', selectedDateStr);
+      const resDocRef = doc(db, 'school_reservations', selectedDateStr);
       await setDoc(resDocRef, { reservations: updated });
       setShowReservationDetail(null);
-    } catch (error) {
+      setDeleteConfirmTarget(null);
+      showToast("예약 자리가 정상적으로 취소(반납)되었습니다.", "success");
+    } catch (error: any) {
+      console.error("예약 취소 에러:", error);
+      showToast("예약을 취소하지 못했습니다. (권한 없음 혹은 네트워크 오류)", "error");
       handleFirestoreError(error, OperationType.DELETE, resPath);
     } finally {
       setIsSaving(false);
     }
   };
 
+  const cancelReservation = async (room: string, periodId: number) => {
+    const compoundKey = `${room}_${periodId}`;
+    const res = dailyReservations[compoundKey];
+    setDeleteConfirmTarget({ room, periodId, res });
+  };
+
+  const startEditingReservation = () => {
+    if (!showReservationDetail) return;
+    const { room, period, res } = showReservationDetail;
+    setFormClass(res.teacherClass);
+    setFormTeacher(res.teacherName);
+    setFormMemo(res.memo || '');
+    setActiveBookingCell({ room, period });
+    setShowReservationDetail(null);
+    setFormValidationError(null);
+  };
+
   // ------------------------------------------
   // 관리자 설정 변경 액션 (Admin Settings Logic)
   // ------------------------------------------
   const saveGeneralSettings = async () => {
-    if (!isAdmin) return;
+    if (!isAdmin) {
+      alert("관리자 권한이 없습니다.");
+      return;
+    }
     setIsSaving(true);
     setSavingStatus("저장 중...");
     
-    const settingsPath = 'settings/config';
+    const settingsPath = 'school_settings/config';
     try {
-      const settingsRef = doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'config');
+      const settingsRef = doc(db, 'school_settings', 'config');
       await setDoc(settingsRef, {
         ...settings,
         appName: editGeneral.appName,
         appDescription: editGeneral.appDescription,
         copyright: editGeneral.copyright,
-        contactEmail: editGeneral.contactEmail
+        contactEmail: editGeneral.contactEmail,
+        roomsPerRow: editGeneral.roomsPerRow || 3
       }, { merge: true });
       
       setSavingStatus("성공적으로 저장되었습니다!");
       setTimeout(() => setSavingStatus(null), 3000);
-    } catch (error) {
-      handleFirestoreError(error, OperationType.WRITE, settingsPath);
+    } catch (error: any) {
+      console.error("설정 저장 에러:", error);
+      setSavingStatus("저장 실패 (권한 없음)");
+      alert(`설정 저장에 실패했습니다.\n(Firebase 권한 규칙에 어긋나거나 관리자 계정 권한이 적용되지 않았을 수 있습니다.)`);
+      setTimeout(() => setSavingStatus(null), 3500);
     } finally {
       setIsSaving(false);
     }
   };
 
   const addSpecialRoom = async () => {
-    if (!isAdmin || !newRoomInput.trim()) return;
+    if (!isAdmin) return;
+    if (!newRoomInput.trim()) return;
     if (settings.specialRooms.includes(newRoomInput.trim())) {
       alert("이미 존재하는 특별실 이름입니다.");
       return;
@@ -569,11 +647,12 @@ export default function App() {
     setIsSaving(true);
     const newList = [...settings.specialRooms, newRoomInput.trim()];
     try {
-      const settingsRef = doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'config');
+      const settingsRef = doc(db, 'school_settings', 'config');
       await setDoc(settingsRef, { specialRooms: newList }, { merge: true });
       setNewRoomInput('');
-    } catch (error) {
-      handleFirestoreError(error, OperationType.WRITE, 'settings/config');
+    } catch (error: any) {
+      console.error("특별실 추가 에러:", error);
+      alert("특별실 추가 권한이 없습니다.");
     } finally {
       setIsSaving(false);
     }
@@ -586,17 +665,49 @@ export default function App() {
     setIsSaving(true);
     const newList = settings.specialRooms.filter(r => r !== roomName);
     try {
-      const settingsRef = doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'config');
+      const settingsRef = doc(db, 'school_settings', 'config');
       await setDoc(settingsRef, { specialRooms: newList }, { merge: true });
-    } catch (error) {
-      handleFirestoreError(error, OperationType.WRITE, 'settings/config');
+    } catch (error: any) {
+      console.error("특별실 삭제 에러:", error);
+      alert("특별실 삭제 권한이 없습니다.");
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const saveEditedRoomName = async (oldName: string) => {
+    if (!isAdmin) return;
+    const newName = editingRoomNameInput.trim();
+    if (!newName) {
+      alert("특별실 이름을 입력해 주세요.");
+      return;
+    }
+    if (newName === oldName) {
+      setEditingRoom(null);
+      return;
+    }
+    if (settings.specialRooms.includes(newName)) {
+      alert("이미 존재하는 특별실 이름입니다.");
+      return;
+    }
+
+    setIsSaving(true);
+    const newList = settings.specialRooms.map(r => r === oldName ? newName : r);
+    try {
+      const settingsRef = doc(db, 'school_settings', 'config');
+      await setDoc(settingsRef, { specialRooms: newList }, { merge: true });
+      setEditingRoom(null);
+    } catch (error: any) {
+      console.error("특별실 이름 수정 에러:", error);
+      alert("특별실 이름 수정 권한이 없습니다.");
     } finally {
       setIsSaving(false);
     }
   };
 
   const addClassItem = async () => {
-    if (!isAdmin || !newClassInput.trim()) return;
+    if (!isAdmin) return;
+    if (!newClassInput.trim()) return;
     if (settings.classes.includes(newClassInput.trim())) {
       alert("이미 존재하는 대상(학급)입니다.");
       return;
@@ -605,11 +716,12 @@ export default function App() {
     setIsSaving(true);
     const newList = [...settings.classes, newClassInput.trim()];
     try {
-      const settingsRef = doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'config');
+      const settingsRef = doc(db, 'school_settings', 'config');
       await setDoc(settingsRef, { classes: newList }, { merge: true });
       setNewClassInput('');
-    } catch (error) {
-      handleFirestoreError(error, OperationType.WRITE, 'settings/config');
+    } catch (error: any) {
+      console.error("학급 추가 에러:", error);
+      alert("학급 추가 권한이 없습니다.");
     } finally {
       setIsSaving(false);
     }
@@ -620,10 +732,96 @@ export default function App() {
     setIsSaving(true);
     const newList = settings.classes.filter(c => c !== className);
     try {
-      const settingsRef = doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'config');
+      const settingsRef = doc(db, 'school_settings', 'config');
       await setDoc(settingsRef, { classes: newList }, { merge: true });
-    } catch (error) {
-      handleFirestoreError(error, OperationType.WRITE, 'settings/config');
+    } catch (error: any) {
+      console.error("학급 삭제 에러:", error);
+      alert("학급 삭제 권한이 없습니다.");
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const saveEditedClassName = async (oldName: string) => {
+    if (!isAdmin) return;
+    const newName = editingClassNameInput.trim();
+    if (!newName) {
+      alert("학급/교사 이름을 입력해 주세요.");
+      return;
+    }
+    if (newName === oldName) {
+      setEditingClass(null);
+      return;
+    }
+    if (settings.classes.includes(newName)) {
+      alert("이미 존재하는 학급/교사 이름입니다.");
+      return;
+    }
+
+    setIsSaving(true);
+    const newList = settings.classes.map(c => c === oldName ? newName : c);
+    try {
+      const settingsRef = doc(db, 'school_settings', 'config');
+      await setDoc(settingsRef, { classes: newList }, { merge: true });
+      setEditingClass(null);
+    } catch (error: any) {
+      console.error("학급 이름 수정 에러:", error);
+      alert("학급 이름 수정 권한이 없습니다.");
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const addPeriodItem = async () => {
+    if (!isAdmin) return;
+    const nameStr = newPeriodName.trim();
+    if (!nameStr) {
+      alert("교시 이름을 입력해 주세요.");
+      return;
+    }
+    
+    // Check if period name already exists
+    if (settings.periods.some(p => p.name === nameStr)) {
+      alert("이미 존재하는 교시 이름입니다.");
+      return;
+    }
+
+    setIsSaving(true);
+    const nextId = settings.periods.length > 0 ? Math.max(...settings.periods.map(p => p.id), 0) + 1 : 1;
+    const newPeriod: Period = {
+      id: nextId,
+      name: nameStr,
+      startTime: newPeriodStartTime.trim() || '09:00',
+      endTime: newPeriodEndTime.trim() || '09:40',
+      allowed: true
+    };
+
+    const newPeriods = [...settings.periods, newPeriod];
+    try {
+      const settingsRef = doc(db, 'school_settings', 'config');
+      await setDoc(settingsRef, { periods: newPeriods }, { merge: true });
+      setNewPeriodName('');
+      setNewPeriodStartTime('09:00');
+      setNewPeriodEndTime('09:40');
+    } catch (error: any) {
+      console.error("교시 추가 에러:", error);
+      alert("교시 추가 권한이 없습니다.");
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const removePeriodItem = async (periodId: number) => {
+    if (!isAdmin) return;
+    if (!confirm("이 교시를 정말 삭제하시겠습니까?\n삭제 시 이 교시의 예약 내용들도 보이지 않게 될 수 있습니다.")) return;
+    setIsSaving(true);
+    const newPeriods = settings.periods.filter(p => p.id !== periodId);
+    try {
+      const settingsRef = doc(db, 'school_settings', 'config');
+      await setDoc(settingsRef, { periods: newPeriods }, { merge: true });
+    } catch (error: any) {
+      console.error("교시 삭제 에러:", error);
+      alert("교시 삭제 권한이 없습니다.");
     } finally {
       setIsSaving(false);
     }
@@ -640,10 +838,11 @@ export default function App() {
     });
 
     try {
-      const settingsRef = doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'config');
+      const settingsRef = doc(db, 'school_settings', 'config');
       await setDoc(settingsRef, { periods: newPeriods }, { merge: true });
-    } catch (error) {
-      handleFirestoreError(error, OperationType.WRITE, 'settings/config');
+    } catch (error: any) {
+      console.error("교시 활성화 변경 에러:", error);
+      alert("교시 설정 수정 권한이 없습니다.");
     } finally {
       setIsSaving(false);
     }
@@ -659,10 +858,49 @@ export default function App() {
     });
 
     try {
-      const settingsRef = doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'config');
+      const settingsRef = doc(db, 'school_settings', 'config');
       await setDoc(settingsRef, { periods: newPeriods }, { merge: true });
-    } catch (error) {
-      handleFirestoreError(error, OperationType.WRITE, 'settings/config');
+    } catch (error: any) {
+      console.error("교시 시간 편집 에러:", error);
+      alert("시간 편집 수정 권한이 없습니다.");
+    }
+  };
+
+  const saveEditedPeriod = async (periodId: number) => {
+    if (!isAdmin) return;
+    const nameStr = editingPeriodNameInput.trim();
+    if (!nameStr) {
+      alert("일과(교시) 이름을 입력해 주세요.");
+      return;
+    }
+
+    if (settings.periods.some(p => p.id !== periodId && p.name === nameStr)) {
+      alert("이미 동일한 일과(교시)명이 존재합니다.");
+      return;
+    }
+
+    setIsSaving(true);
+    const newPeriods = settings.periods.map(p => {
+      if (p.id === periodId) {
+        return {
+          ...p,
+          name: nameStr,
+          startTime: editingPeriodStartTimeInput.trim() || p.startTime,
+          endTime: editingPeriodEndTimeInput.trim() || p.endTime
+        };
+      }
+      return p;
+    });
+
+    try {
+      const settingsRef = doc(db, 'school_settings', 'config');
+      await setDoc(settingsRef, { periods: newPeriods }, { merge: true });
+      setEditingPeriodId(null);
+    } catch (error: any) {
+      console.error("일과 수정 에러:", error);
+      alert("일과 정보 수정 권한이 없습니다.");
+    } finally {
+      setIsSaving(false);
     }
   };
 
@@ -701,7 +939,7 @@ export default function App() {
     
     // 이전 달 빈칸 채우기
     for (let i = 0; i < firstDay; i++) {
-      cells.push(<div key={`empty-${i}`} className="h-8 flex items-center justify-center text-xs text-slate-200" />);
+      cells.push(<div key={`empty-${i}`} className="h-7 flex items-center justify-center text-[10px] text-slate-200" />);
     }
 
     // 일자 채우기
@@ -726,7 +964,7 @@ export default function App() {
         <button
           key={`day-${day}`}
           onClick={() => setSelectedDate(currentCellDate)}
-          className={`h-8 w-full flex flex-col items-center justify-center text-xs font-semibold border relative rounded-md transition-all cursor-pointer ${
+          className={`h-7 w-full flex flex-col items-center justify-center text-[11px] font-semibold border relative rounded-md transition-all cursor-pointer ${
             isSelected 
               ? 'bg-indigo-600 font-bold text-white shadow-sm border-transparent' 
               : isToday
@@ -737,7 +975,7 @@ export default function App() {
         >
           <span className={isSelected ? 'text-white' : textColor}>{day}</span>
           {hasBooking && (
-            <span className={`absolute bottom-0.5 w-1 h-1 rounded-full ${isSelected ? 'bg-amber-300' : 'bg-indigo-500'}`} />
+            <span className={`absolute bottom-0.5 w-1.5 h-1.5 rounded-full ${isSelected ? 'bg-amber-300' : 'bg-indigo-500'}`} />
           )}
         </button>
       );
@@ -780,12 +1018,21 @@ export default function App() {
           A. 앱 네비게이션 & 헤더 (Header Layout)
           ========================================== */}
       <header className="h-14 bg-white border-b border-slate-200 px-4 sm:px-6 flex items-center justify-between flex-shrink-0 sticky top-0 z-40">
-        <div className="flex items-center gap-3">
-          <div className="w-9 h-9 bg-indigo-600 rounded-lg flex items-center justify-center text-white shadow-sm flex-shrink-0">
+        <div 
+          onClick={() => {
+            setSelectedBoardRoom(null);
+            setActiveBookingCell(null);
+            setShowReservationDetail(null);
+            setIsSettingsOpen(false);
+          }}
+          className="flex items-center gap-3 cursor-pointer group hover:opacity-95 select-none"
+          title="초기화면으로 이동"
+        >
+          <div className="w-9 h-9 bg-indigo-600 rounded-lg flex items-center justify-center text-white shadow-sm flex-shrink-0 group-hover:scale-105 transition-transform">
             <BookOpen className="h-4.5 w-4.5" />
           </div>
           <div>
-            <h1 className="text-sm font-bold text-slate-900 leading-tight flex items-center gap-1.5">
+            <h1 className="text-sm font-bold text-slate-900 leading-tight flex items-center gap-1.5 group-hover:text-indigo-650 transition-colors">
               {settings.appName}
               <span className="inline-flex bg-indigo-50 text-indigo-700 text-[9px] font-semibold px-1.5 py-0.2 rounded-full border border-indigo-100 flex-shrink-0">
                 실시간 연동
@@ -860,25 +1107,25 @@ export default function App() {
       {/* ==========================================
           B. 메인 대시보드 구조 (Main Content Grid)
           ========================================== */}
-      <main className="flex-1 flex overflow-hidden p-4 gap-4 flex-col lg:flex-row">
+      <main className="flex-1 flex p-4 gap-4 flex-col md:flex-row overflow-y-auto md:overflow-hidden min-h-0">
         
         {/* Sidebar: Calendar & Today's Summary */}
-        <aside className="w-full lg:w-[280px] flex flex-col gap-4 flex-shrink-0 overflow-y-auto lg:overflow-visible">
+        <aside className="w-full md:w-[280px] flex flex-col gap-4 flex-shrink-0 overflow-y-auto md:overflow-visible">
           
           {/* Calendar Card */}
-          <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-4">
-            <div className="flex items-center justify-between mb-4">
-              <h2 className="font-bold text-slate-800 text-sm">{calendarMonth.getFullYear()}년 {calendarMonth.getMonth() + 1}월</h2>
+          <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-3">
+            <div className="flex items-center justify-between mb-2.5">
+              <h2 className="font-bold text-slate-800 text-xs">{calendarMonth.getFullYear()}년 {calendarMonth.getMonth() + 1}월</h2>
               <div className="flex gap-1">
                 <button 
                   onClick={prevMonth} 
                   className="p-1 text-slate-400 hover:text-slate-600 hover:bg-slate-50 rounded transition-colors"
                 >
-                  <ChevronLeft className="w-4 h-4" />
+                  <ChevronLeft className="w-3.5 h-3.5" />
                 </button>
                 <button 
                   onClick={setToday} 
-                  className="px-1.5 py-0.5 text-[10px] font-bold text-indigo-600 hover:bg-indigo-50 rounded transition-colors whitespace-nowrap"
+                  className="px-1.5 py-0.5 text-[9px] font-bold text-indigo-600 hover:bg-indigo-50 rounded transition-colors whitespace-nowrap"
                 >
                   오늘
                 </button>
@@ -886,12 +1133,12 @@ export default function App() {
                   onClick={nextMonth} 
                   className="p-1 text-slate-400 hover:text-slate-600 hover:bg-slate-50 rounded transition-colors"
                 >
-                  <ChevronRight className="w-4 h-4" />
+                  <ChevronRight className="w-3.5 h-3.5" />
                 </button>
               </div>
             </div>
             
-            <div className="grid grid-cols-7 text-center text-[10px] font-bold text-slate-400 uppercase tracking-tighter mb-2">
+            <div className="grid grid-cols-7 text-center text-[9px] font-bold text-slate-400 uppercase mb-1.5">
               <div className="text-red-500">일</div>
               <div>월</div>
               <div>화</div>
@@ -901,54 +1148,130 @@ export default function App() {
               <div className="text-blue-500">토</div>
             </div>
             
-            <div className="grid grid-cols-7 gap-1">
+            <div className="grid grid-cols-7 gap-0.5">
               {renderCalendarDays()}
             </div>
           </div>
 
           {/* Today's Summary (오늘의 요약) Card */}
-          <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-4 flex-1 flex flex-col overflow-hidden min-h-[220px]">
-            <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3">
-              예약 요약 ({selectedDate.getMonth() + 1}월 {selectedDate.getDate()}일)
+          <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-3 flex-1 flex flex-col overflow-hidden min-h-[300px]">
+            <h3 className="text-xs font-black text-slate-800 uppercase tracking-wider mb-2 flex items-center gap-1.5 border-b border-slate-100 pb-1.5">
+              <span className="w-1.5 h-3 bg-indigo-600 rounded-sm"></span>
+              날짜별 예약 요약 ({selectedDate.getMonth() + 1}월 {selectedDate.getDate()}일)
             </h3>
-            <div className="space-y-2 overflow-y-auto flex-1 pr-1">
-              {settings.specialRooms.map((room, roomIdx) => {
-                const totalPeriods = settings.periods.filter(p => p.allowed).length;
-                const bookedCount = settings.periods.filter(p => {
-                  if (!p.allowed) return false;
-                  const key = `${room}_${p.id}`;
-                  return !!dailyReservations[key];
-                }).length;
+            
+            <div className="flex-1 overflow-y-auto space-y-3 pr-1">
+              {/* 특별실별 요약 비율 */}
+              <div className="space-y-1.5">
+                <span className="block text-[10px] font-extrabold text-slate-400 tracking-wider">특별실별 예약 현황</span>
+                <div className="grid grid-cols-2 gap-1.5">
+                  {settings.specialRooms.map((room, roomIdx) => {
+                    const totalPeriods = settings.periods.filter(p => p.allowed).length;
+                    const bookedCount = settings.periods.filter(p => {
+                      if (!p.allowed) return false;
+                      const key = `${room}_${p.id}`;
+                      return !!dailyReservations[key];
+                    }).length;
 
-                const themes = [
-                  { bg: 'bg-indigo-50 border border-indigo-100 text-indigo-700', sub: 'text-indigo-600' },
-                  { bg: 'bg-emerald-50 border border-emerald-100 text-emerald-700', sub: 'text-emerald-600' },
-                  { bg: 'bg-amber-50 border border-amber-100 text-amber-700', sub: 'text-amber-600' },
-                  { bg: 'bg-sky-50 border border-sky-100 text-sky-700', sub: 'text-sky-650' },
-                  { bg: 'bg-rose-50 border border-rose-100 text-rose-700', sub: 'text-rose-650' }
-                ];
-                const activeTheme = themes[roomIdx % themes.length];
+                    const themes = [
+                      { bg: 'bg-indigo-50/80 border border-indigo-100 text-indigo-700', sub: 'bg-indigo-200/55', text: 'text-indigo-700' },
+                      { bg: 'bg-emerald-50/80 border border-emerald-100 text-emerald-700', sub: 'bg-emerald-200/55', text: 'text-emerald-700' },
+                      { bg: 'bg-amber-50/80 border border-amber-100 text-amber-700', sub: 'bg-amber-200/55', text: 'text-amber-700' },
+                      { bg: 'bg-sky-50/80 border border-sky-100 text-sky-700', sub: 'bg-sky-200/55', text: 'text-sky-700' },
+                      { bg: 'bg-rose-50/80 border border-rose-100 text-rose-700', sub: 'bg-rose-200/55', text: 'text-rose-700' }
+                    ];
+                    const activeTheme = themes[roomIdx % themes.length];
+                    const percent = totalPeriods > 0 ? (bookedCount / totalPeriods) * 100 : 0;
 
-                return (
-                  <div key={`summary-${roomIdx}`} className={`p-2.5 rounded-lg border transition-all ${activeTheme.bg}`}>
-                    <p className="text-[11px] font-bold">{room} 예약 현황</p>
-                    <p className={`text-xs mt-0.5 font-semibold ${activeTheme.sub}`}>
-                      {totalPeriods}개 교시 중 {bookedCount}개 예약됨
-                    </p>
-                  </div>
-                );
-              })}
+                    return (
+                      <div key={`summary-${roomIdx}`} className={`p-1.5 rounded-lg border transition-all ${activeTheme.bg} flex flex-col gap-1`}>
+                        <div className="flex justify-between items-center text-[10px] leading-tight-none">
+                          <span className="font-bold truncate max-w-[65px]" title={room}>{room}</span>
+                          <span className={`font-black text-[9px] ${activeTheme.text}`}>
+                            {bookedCount}/{totalPeriods}
+                          </span>
+                        </div>
+                        {/* 미니 프로그레스 바 */}
+                        <div className="w-full h-1 bg-slate-200/60 rounded-full overflow-hidden">
+                          <div className={`h-full ${activeTheme.sub} rounded-full transition-all duration-300`} style={{ width: `${percent}%` }} />
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* 실시간 상세 예약 목록 */}
+              <div className="border-t border-slate-100 pt-3">
+                {(() => {
+                  const todayBookingsList: { room: string; p: any; booking: any }[] = [];
+                  settings.specialRooms.forEach(room => {
+                    settings.periods.forEach(p => {
+                      const key = `${room}_${p.id}`;
+                      const booking = dailyReservations[key];
+                      if (booking) {
+                        todayBookingsList.push({ room, p, booking });
+                      }
+                    });
+                  });
+
+                  return (
+                    <div className="space-y-2">
+                      <span className="block text-[10px] font-extrabold text-slate-400 tracking-wider">
+                        실시간 상세 예약 ({todayBookingsList.length})
+                      </span>
+                      {todayBookingsList.length === 0 ? (
+                        <div className="p-4 bg-slate-50 border border-slate-150 rounded-xl text-center">
+                          <p className="text-[11px] text-slate-400 font-medium">선택한 날짜에 등록된<br />예약 일정이 없습니다.</p>
+                        </div>
+                      ) : (
+                        <div className="space-y-1.5 max-h-[220px] overflow-y-auto pr-0.5">
+                          {todayBookingsList.map((item, idx) => (
+                            <div key={`side-res-${idx}`} className="p-2.5 bg-slate-50 border border-slate-150 rounded-lg text-[11px] flex flex-col gap-1 hover:border-slate-300 transition-colors">
+                              <div className="flex items-center justify-between font-bold">
+                                <span className="text-slate-800">{item.room} <span className="text-slate-400">·</span> {item.p.name}</span>
+                                <span className="text-indigo-700 bg-indigo-50 border border-indigo-100 px-1.5 py-0.2 rounded text-[9px] font-black">
+                                  {item.booking.teacherClass}
+                                </span>
+                              </div>
+                              <div className="flex items-center justify-between text-slate-500 text-[10px]">
+                                <span>{item.p.startTime} ~ {item.p.endTime}</span>
+                                <span className="font-bold text-slate-700">{item.booking.teacherName} 선생님</span>
+                              </div>
+                              {item.booking.memo && (
+                                <p className="text-[10px] text-slate-400 truncate mt-0.5 border-l-2 border-indigo-200 pl-1.5 italic">
+                                  {item.booking.memo}
+                                </p>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
+              </div>
             </div>
           </div>
 
         </aside>
 
         {/* Main Matrix Section */}
-        <section id="reservation_matrix_section" className="flex-1 bg-white rounded-xl shadow-sm border border-slate-200 flex flex-col overflow-hidden relative">
+        <section id="reservation_matrix_section" className="flex-1 bg-white rounded-xl shadow-sm border border-slate-200 flex flex-col overflow-hidden relative min-h-[500px] md:min-h-0">
           
           {/* Matrix Toolbar */}
           <div className="p-3 border-b border-slate-150 flex items-center justify-between bg-slate-50/50 flex-shrink-0">
             <div className="flex items-center gap-2">
+              {selectedBoardRoom && (
+                <button
+                  type="button"
+                  onClick={() => setSelectedBoardRoom(null)}
+                  className="px-2.5 py-1 bg-white border border-slate-200 hover:bg-slate-50 text-slate-650 hover:text-slate-800 rounded-md text-xs font-black transition-all flex items-center gap-1 cursor-pointer shadow-3xs"
+                >
+                  <ArrowLeft className="w-3.5 h-3.5" />
+                  <span className="hidden sm:inline">전체 특별실</span>
+                </button>
+              )}
               <span className="px-3 py-1 bg-white border border-slate-200 rounded-md text-xs font-bold text-slate-700 shadow-sm flex items-center gap-1.5 font-mono">
                 {selectedDate.getFullYear()}년 {selectedDate.getMonth() + 1}월 {selectedDate.getDate()}일 ({getWeekDayKorean(selectedDate)}요일)
               </span>
@@ -956,7 +1279,7 @@ export default function App() {
             <div className="flex gap-2">
               <div className="flex items-center space-x-1 bg-indigo-50/60 rounded-md px-2 py-1 text-[10px] text-indigo-850 border border-indigo-100/50">
                 <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 inline-block animate-pulse" />
-                <span className="font-bold">실시간 연동</span>
+                <span className="font-bold">실시간 예약 신청 보드</span>
               </div>
             </div>
           </div>
@@ -966,163 +1289,275 @@ export default function App() {
             <div className="absolute top-0 inset-x-0 h-0.5 bg-indigo-500 animate-pulse z-10" />
           )}
 
-          {/* 반응형 가로 스크롤 매트릭스 래퍼 (드롭다운 가려짐 원천 방어 pb-32 포함) */}
-          <div className="overflow-x-auto w-full pb-32 flex-1">
-            <table className="w-full border-collapse min-w-[900px]">
-              <thead>
-                <tr>
-                  {/* 구분 헤더 */}
-                  <th className="p-2 text-center text-[10px] font-bold text-slate-500 bg-slate-100/80 border border-slate-200 w-[110px]">
-                    교시 / 시간
-                  </th>
-                  
-                  {/* 실시간 특별실 리스트 헤더 */}
-                  {settings.specialRooms.map((room, idx) => (
-                    <th
-                      key={`header-room-${idx}`}
-                      className="p-2 text-center text-xs font-bold text-slate-800 bg-indigo-50/30 border border-slate-200 min-w-[130px]"
-                    >
-                      <div className="flex items-center justify-center gap-1.5">
-                        <span className="inline-flex items-center justify-center p-1 bg-indigo-100/50 rounded text-indigo-700">
-                          <MapPin className="w-3 h-3" />
-                        </span>
-                        <span className="text-slate-900 font-extrabold">{room}</span>
-                      </div>
-                    </th>
-                  ))}
+          {/* 반응형 룸 리스트 grid 및 하루 일과표 (bento -> 일과 타임라인) */}
+          <div className="overflow-y-auto w-full pb-20 flex-1 bg-slate-50/20">
+            {selectedBoardRoom === null ? (
+              <div className="p-5 sm:p-6 lg:p-8 flex-1 space-y-6">
+                <div>
+                  <h4 className="text-xs font-black text-indigo-650 uppercase tracking-widest bg-indigo-50 inline-block px-2.5 py-1 rounded-md mb-2">SPECIAL ROOM LISTS</h4>
+                  <p className="text-sm font-black text-slate-800">예약 및 운영 일과를 확인하실 특별실 단추를 선택해 주세요</p>
+                  <p className="text-xs text-slate-450 font-medium">선택하시면 해당 특별실의 세부 탑재 교시와 대여 현황을 확인하고 접수할 수 있습니다.</p>
+                </div>
+                
+                <div className={`grid gap-5 ${
+                  settings.roomsPerRow === 1 ? 'grid-cols-1' :
+                  settings.roomsPerRow === 2 ? 'grid-cols-1 sm:grid-cols-2' :
+                  settings.roomsPerRow === 4 ? 'grid-cols-2 sm:grid-cols-3 md:grid-cols-4' :
+                  settings.roomsPerRow === 6 ? 'grid-cols-2 sm:grid-cols-4 md:grid-cols-6' :
+                  'grid-cols-1 sm:grid-cols-2 md:grid-cols-3'
+                }`}>
+                  {settings.specialRooms.map((room, idx) => {
+                    const totalPeriods = settings.periods.filter(p => p.allowed).length;
+                    const bookedCount = settings.periods.filter(p => {
+                      if (!p.allowed) return false;
+                      const key = `${room}_${p.id}`;
+                      return !!dailyReservations[key];
+                    }).length;
 
-                  {/* 통합 관리 정보 요약 헤더 (Combined Column) */}
-                  <th className="p-2 text-center text-[10px] font-extrabold text-white bg-slate-800 border border-slate-700 w-[220px]">
-                    <div className="flex flex-col items-center">
-                      <span className="text-indigo-300 text-[8px] uppercase font-bold tracking-wider">CONSOLIDATED</span>
-                      <span>통합 현황</span>
-                    </div>
-                  </th>
-                </tr>
-              </thead>
-              
-              <tbody>
-                {settings.periods.map((period) => (
-                  <tr
-                    key={`period-row-${period.id}`}
-                    className={`group/row ${!period.allowed ? 'opacity-60 bg-slate-50/20' : 'hover:bg-slate-50/30'}`}
-                  >
-                    {/* 교시 열정보 */}
-                    <td className="p-2 border border-slate-200 bg-slate-100/40 text-center">
-                      <div className="font-extrabold text-slate-900 text-xs">{period.name}</div>
-                      <div className="text-[9px] text-slate-400 mt-0.5 flex items-center justify-center gap-0.5 font-semibold">
-                        <Clock className="w-2.5 h-2.5 text-slate-400" />
-                        {period.startTime} ~ {period.endTime}
-                      </div>
-                      {!period.allowed && (
-                        <span className="mt-1 inline-block text-[8px] bg-red-50 text-red-600 px-1 rounded font-bold border border-red-100">
-                          불가
-                        </span>
-                      )}
-                    </td>
+                    const percent = totalPeriods > 0 ? Math.round((bookedCount / totalPeriods) * 100) : 0;
+                    const isFull = bookedCount === totalPeriods && totalPeriods > 0;
 
-                    {/* 각 특별실 기입 란 */}
-                    {settings.specialRooms.map((room) => {
-                      const compoundKey = `${room}_${period.id}`;
-                      const booking = dailyReservations[compoundKey];
-
-                      if (!period.allowed) {
-                        return (
-                          <td
-                            key={`cell-${room}-${period.id}`}
-                            className="p-2 border border-slate-200 bg-slate-100/20 text-center text-[10px] text-slate-400 select-none cursor-not-allowed"
-                          >
-                            <span className="opacity-40 font-bold">제한</span>
-                          </td>
-                        );
+                    const colors = [
+                      {
+                        border: 'hover:border-indigo-400 border-slate-200/80',
+                        bg: 'bg-white',
+                        headerBg: 'bg-indigo-50/40 border-b border-indigo-100/50',
+                        badge: 'bg-indigo-100/60 text-indigo-700',
+                        percentBar: 'bg-indigo-600',
+                        text: 'text-indigo-805'
+                      },
+                      {
+                        border: 'hover:border-emerald-400 border-slate-200/80',
+                        bg: 'bg-white',
+                        headerBg: 'bg-emerald-50/40 border-b border-emerald-100/50',
+                        badge: 'bg-emerald-100/60 text-emerald-700',
+                        percentBar: 'bg-emerald-500',
+                        text: 'text-emerald-805'
+                      },
+                      {
+                        border: 'hover:border-amber-400 border-slate-200/80',
+                        bg: 'bg-white',
+                        headerBg: 'bg-amber-50/40 border-b border-amber-100/50',
+                        badge: 'bg-amber-100/60 text-amber-750',
+                        percentBar: 'bg-amber-500',
+                        text: 'text-amber-805'
+                      },
+                      {
+                        border: 'hover:border-sky-450 border-slate-200/80',
+                        bg: 'bg-white',
+                        headerBg: 'bg-sky-50/40 border-b border-sky-100/50',
+                        badge: 'bg-sky-100/60 text-sky-700',
+                        percentBar: 'bg-sky-600',
+                        text: 'text-sky-805'
+                      },
+                      {
+                        border: 'hover:border-rose-400 border-slate-200/80',
+                        bg: 'bg-white',
+                        headerBg: 'bg-rose-50/40 border-b border-rose-100/50',
+                        badge: 'bg-rose-100/60 text-rose-700',
+                        percentBar: 'bg-rose-600',
+                        text: 'text-rose-805'
                       }
+                    ];
+                    const theme = colors[idx % colors.length];
 
+                    return (
+                      <motion.div
+                        key={`grid-room-${room}`}
+                        onClick={() => setSelectedBoardRoom(room)}
+                        whileHover={{ y: -4, scale: 1.015 }}
+                        className={`rounded-2xl border ${theme.border} ${theme.bg} shadow-xs hover:shadow-md transition-all overflow-hidden flex flex-col justify-between cursor-pointer group`}
+                      >
+                        <div>
+                          <div className={`p-4 ${theme.headerBg} flex items-center justify-between`}>
+                            <div className="flex items-center gap-2.5">
+                              <span className={`p-2 rounded-xl ${theme.badge} font-black flex items-center justify-center`}>
+                                <MapPin className="w-4 h-4" />
+                              </span>
+                              <span className="font-extrabold text-slate-800 text-[13px] tracking-tight group-hover:text-indigo-650 transition-colors">
+                                {room}
+                              </span>
+                            </div>
+                            {isFull ? (
+                              <span className="text-[10px] font-bold bg-rose-50 text-rose-650 px-2 py-0.5 rounded-full border border-rose-100">
+                                예약 마감
+                              </span>
+                            ) : (
+                              <span className="text-[10px] font-bold bg-emerald-50 text-emerald-650 px-2 py-0.5 rounded-full border border-emerald-100">
+                                대여 가능
+                              </span>
+                            )}
+                          </div>
+                          
+                          <div className="p-4 space-y-3">
+                            <div className="flex justify-between items-end text-xs">
+                              <span className="text-slate-400 font-bold">오전/오후 대여율</span>
+                              <span className="text-slate-800 font-black">
+                                {bookedCount} <span className="text-slate-350 font-normal">/</span> {totalPeriods} 교시 ({percent}%)
+                              </span>
+                            </div>
+                            <div className="w-full h-1.5 bg-slate-100 rounded-full overflow-hidden">
+                              <div
+                                className={`h-full ${theme.percentBar} rounded-full transition-all duration-500`}
+                                style={{ width: `${percent}%` }}
+                              />
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="px-4 pb-4">
+                          <div
+                            className="w-full py-2.5 rounded-xl border border-transparent text-xs font-black text-center transition-all flex items-center justify-center gap-1 bg-slate-50 text-slate-650 group-hover:bg-indigo-600 group-hover:text-white cursor-pointer"
+                          >
+                            <span>운영 일과표 개방 및 예약</span>
+                            <ChevronRight className="w-3.5 h-3.5 transition-transform group-hover:translate-x-0.5" />
+                          </div>
+                        </div>
+                      </motion.div>
+                    );
+                  })}
+                </div>
+              </div>
+            ) : (
+              <div className="p-5 sm:p-6 lg:p-8 flex-1 space-y-6">
+                {/* 헤더 및 요약 정보 */}
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-150 pb-4">
+                  <div className="flex items-center gap-3">
+                    <button
+                      type="button"
+                      onClick={() => setSelectedBoardRoom(null)}
+                      className="p-2 border border-slate-200 hover:border-slate-350 hover:bg-slate-50 transition-all rounded-xl text-slate-500 hover:text-slate-800 cursor-pointer bg-white flex items-center justify-center"
+                      title="특별실 전체 목록으로 돌아가기"
+                    >
+                      <ArrowLeft className="w-4 h-4" />
+                    </button>
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <span className="p-1 px-2.5 bg-indigo-50 border border-indigo-100 text-indigo-700 rounded-lg text-xs font-black">
+                          {selectedBoardRoom}
+                        </span>
+                        <h4 className="text-sm font-black text-slate-800">하루 일과표 및 예약 현황</h4>
+                      </div>
+                      <p className="text-[11px] text-slate-400 mt-0.5">교시별로 비어있는 운영시간 단추를 탭하여 대여 신청서를 접수해 주십시오.</p>
+                    </div>
+                  </div>
+
+                  {/* 퀵 특별실 변경 셀렉터 */}
+                  <div className="flex items-center gap-1.5 bg-slate-100 p-1 rounded-xl border border-slate-200">
+                    <span className="text-[10px] font-black text-slate-500 px-1.5">특별실 신속 전환:</span>
+                    <select
+                      value={selectedBoardRoom}
+                      onChange={(e) => setSelectedBoardRoom(e.target.value)}
+                      className="text-xs bg-white border border-slate-200 rounded-lg p-1.5 font-bold text-slate-700 outline-hidden focus:ring-1 focus:ring-indigo-500 cursor-pointer focus:border-indigo-500"
+                    >
+                      {settings.specialRooms.map((r) => (
+                        <option key={`quick-opt-${r}`} value={r}>{r}</option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+
+                {/* 일과 시간 대 세로 타임라인 카드 */}
+                <div className="space-y-3 max-w-3xl mx-auto">
+                  {settings.periods.map((period) => {
+                    const compoundKey = `${selectedBoardRoom}_${period.id}`;
+                    const booking = dailyReservations[compoundKey];
+
+                    if (!period.allowed) {
                       return (
-                        <td
-                          key={`cell-${room}-${period.id}`}
-                          className="p-1 border border-slate-200 transition-all text-center relative"
+                        <div
+                          key={`timeline-${period.id}`}
+                          className="flex items-stretch border border-slate-150 rounded-2xl bg-slate-50/50 opacity-60 overflow-hidden"
                         >
-                          {booking ? (
-                            // 예약 완료 셀 UI -> 더 고밀도, 단정하게
-                            <button
-                              onClick={() => openBookingForm(room, period)}
-                              className="w-full p-2.5 rounded-lg bg-indigo-50/70 hover:bg-indigo-100/70 border border-indigo-200 text-left transition-all hover:shadow-xs group cursor-pointer"
-                            >
-                              <div className="flex items-center justify-between gap-1">
-                                <span className="bg-indigo-600 text-white text-[9px] font-black px-1.5 py-0.5 rounded-md truncate max-w-[65px]">
-                                  {booking.teacherClass}
-                                </span>
-                                <span className="text-[10px] text-slate-600 font-bold truncate">
-                                  {booking.teacherName}
-                                </span>
-                              </div>
-                              {booking.memo && (
-                                <p className="text-[9px] text-slate-500 mt-1 truncate border-l-2 border-indigo-300 pl-1 italic">
-                                  {booking.memo}
-                                </p>
-                              )}
-                            </button>
-                          ) : (
-                            // 예약 가능 빈 셀 UI
-                            <button
-                              onClick={() => openBookingForm(room, period)}
-                              className="w-full py-3 hover:border-indigo-400 rounded-lg hover:bg-indigo-50/40 transition-all text-[10px] text-slate-400 hover:text-indigo-600 flex flex-col items-center justify-center gap-0.5 font-bold group cursor-pointer border border-transparent"
-                            >
-                              <Plus className="w-3.5 h-3.5 text-slate-300 group-hover:text-indigo-500 transition-colors" />
-                              <span>예약 신청</span>
-                            </button>
-                          )}
-                        </td>
+                          {/* 교시부 */}
+                          <div className="w-[90px] sm:w-[110px] bg-slate-100/50 p-4.5 flex flex-col justify-center items-center text-center border-r border-slate-150 flex-shrink-0 select-none">
+                            <span className="text-xs font-black text-slate-500">{period.name}</span>
+                            <span className="text-[9px] text-slate-400 font-mono mt-0.5">{period.startTime} ~ {period.endTime}</span>
+                          </div>
+                          {/* 본문부 */}
+                          <div className="flex-1 p-4.5 flex items-center gap-2 select-none">
+                            <Lock className="w-3.5 h-3.5 text-slate-400" />
+                            <span className="text-xs font-extrabold text-slate-400">학업 또는 기본 일과 조정 외 예약 불가 시간</span>
+                          </div>
+                        </div>
                       );
-                    })}
+                    }
 
-                    {/* 통합 요약 칼럼 셀 (Consolidated / Summary Column) */}
-                    <td className="p-1.5 border border-slate-200 bg-slate-50/30 text-left align-top w-[220px]">
-                      {period.allowed ? (
-                        (() => {
-                          const summaryList = getCombinedSummary(period.id);
-                          if (summaryList.length === 0) {
-                            return <span className="text-[9px] text-slate-400 italic block text-center py-2">예약 없음</span>;
-                          }
-                          return (
-                            <div className="space-y-1">
-                              {summaryList.map((summary, sIdx) => (
-                                <div
-                                  key={`summary-${summary.room}-${sIdx}`}
-                                  className="text-[10px] bg-white border border-slate-200/85 rounded p-1 flex items-center justify-between gap-1 shadow-2xs"
-                                >
-                                  <span className="font-bold text-slate-700 truncate w-[70px]">
-                                    {summary.room}
+                    return (
+                      <div
+                        key={`timeline-${period.id}`}
+                        className="flex items-stretch border border-slate-200 hover:border-indigo-350 rounded-2xl bg-white shadow-2xs overflow-hidden transition-all duration-200 group/timeline"
+                      >
+                        {/* 교시부 */}
+                        <div className="w-[90px] sm:w-[110px] bg-slate-50 p-4.5 flex flex-col justify-center items-center text-center border-r border-slate-200 flex-shrink-0 select-none">
+                          <span className="text-xs font-black text-indigo-900">{period.name}</span>
+                          <span className="text-[9px] text-indigo-500/80 font-mono mt-0.5">{period.startTime} ~ {period.endTime}</span>
+                        </div>
+
+                        {/* 우측 예약 현황/신청 카드내역 */}
+                        <div className="flex-1 p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                          {booking ? (
+                            <>
+                              <div className="space-y-1.5 flex-1 min-w-0 pr-2">
+                                <div className="flex items-center gap-2 flex-wrap">
+                                  <span className="bg-indigo-650 text-white text-[9.5px] font-black px-2 py-0.5 rounded-md">
+                                    {booking.teacherClass}
                                   </span>
-                                  <span className="bg-indigo-50 border border-indigo-100 text-indigo-700 text-[8px] font-bold px-1 rounded flex-shrink-0">
-                                    {summary.className} ({summary.teacher})
+                                  <span className="text-xs font-black text-slate-800">
+                                    {booking.teacherName} 선생님 대여 완료
                                   </span>
                                 </div>
-                              ))}
-                            </div>
-                          );
-                        })()
-                      ) : (
-                        <div className="text-[9px] text-rose-400 italic text-center py-2">조정된 일과 없음</div>
-                      )}
-                    </td>
-
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+                                {booking.memo && (
+                                  <p className="text-[11px] text-slate-550 border-l-2 border-indigo-200 pl-2 italic truncate" title={booking.memo}>
+                                    {booking.memo}
+                                  </p>
+                                )}
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => openBookingForm(selectedBoardRoom, period)}
+                                className="sm:self-center px-3 py-1.5 rounded-lg border border-indigo-150 bg-indigo-50/50 hover:bg-indigo-50 text-indigo-700 text-[11px] font-black transition-all cursor-pointer flex-shrink-0 self-start"
+                              >
+                                상세 정보 및 취소
+                              </button>
+                            </>
+                          ) : (
+                            <>
+                              <div className="flex items-center gap-2">
+                                <span className="w-2 h-2 rounded-full bg-emerald-500 inline-block animate-pulse" />
+                                <span className="text-xs font-bold text-slate-450 group-hover/timeline:text-indigo-650 transition-colors">
+                                  시간대 비어 있음 · 안전 대여 운영
+                                </span>
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => openBookingForm(selectedBoardRoom, period)}
+                                className="px-4 py-1.5 rounded-lg border border-slate-200 hover:border-indigo-400 bg-white hover:bg-indigo-50/20 text-slate-600 hover:text-indigo-600 text-[11px] font-black transition-all flex items-center gap-1 cursor-pointer self-start sm:self-center"
+                              >
+                                <Plus className="w-3.5 h-3.5" />
+                                <span>예약하기</span>
+                              </button>
+                            </>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
           </div>
-
-          {/* 하단 푸터 표출 영역 */}
-          <footer className="mt-auto pt-6 border-t border-slate-100 text-center sm:flex sm:items-center sm:justify-between text-[11px] text-slate-400">
-            <p>{settings.copyright}</p>
-            <div className="mt-2 sm:mt-0 flex items-center justify-center space-x-2">
-              <Mail className="w-3.5 h-3.5 text-slate-300" />
-              <span>행정 문의처: <strong>{settings.contactEmail}</strong></span>
-            </div>
-          </footer>
         </section>
       </main>
+
+      {/* 하단 저작권 및 문의 바 */}
+      <footer className="bg-white border-t border-slate-200 py-3.5 px-6 flex flex-col sm:flex-row items-center justify-between text-[11px] text-slate-500 font-semibold flex-shrink-0">
+        <p className="tracking-wide text-slate-600">{settings.copyright}</p>
+        <div className="mt-2 sm:mt-0 flex items-center space-x-2 bg-slate-50 border border-slate-250/30 rounded-full px-3 py-1 shadow-2xs">
+          <Mail className="w-3.5 h-3.5 text-indigo-500" />
+          <span>행정 문의처: <strong className="text-slate-850 font-black">{settings.contactEmail}</strong></span>
+        </div>
+      </footer>
 
       {/* ==========================================
           C. 포커스 아웃 방지형 예약 생성 모달/레이어
@@ -1151,7 +1586,7 @@ export default function App() {
                 <div className="flex justify-between items-center">
                   <h3 className="text-md font-extrabold flex items-center gap-1.5">
                     <Sparkles className="w-4 h-4 text-amber-300" />
-                    특별실 대여 예약 신청
+                    {dailyReservations[`${activeBookingCell.room}_${activeBookingCell.period.id}`] ? "특별실 대여 예약 수정" : "특별실 대여 예약 신청"}
                   </h3>
                   <button
                     onClick={() => setActiveBookingCell(null)}
@@ -1229,13 +1664,28 @@ export default function App() {
                   />
                 </div>
 
+                {/* 에러 메시지 알림 배너 */}
+                {formValidationError && (
+                  <motion.div
+                    initial={{ opacity: 0, y: -5 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    className="p-3 bg-rose-50 rounded-xl border border-rose-100 flex items-center gap-2 text-[11px] text-rose-700 font-bold"
+                  >
+                    <span className="w-1.5 h-1.5 rounded-full bg-rose-500 animate-pulse flex-shrink-0" />
+                    <span>{formValidationError}</span>
+                  </motion.div>
+                )}
+
                 {/* 등록 관리 버튼 */}
                 <div className="pt-3 border-t border-slate-100 flex space-x-2">
                   <button
                     type="button"
-                    onClick={() => setActiveBookingCell(null)}
+                    onClick={() => {
+                      setActiveBookingCell(null);
+                      setFormValidationError(null);
+                    }}
                     disabled={isSaving}
-                    className="flex-1 py-2.5 border border-slate-200 hover:bg-slate-50 text-slate-600 text-xs font-bold rounded-xl transition-all"
+                    className="flex-1 py-2.5 border border-slate-200 hover:bg-slate-50 text-slate-600 text-xs font-bold rounded-xl transition-all cursor-pointer"
                   >
                     취소
                   </button>
@@ -1243,10 +1693,10 @@ export default function App() {
                     type="button"
                     onClick={saveReservation}
                     disabled={isSaving}
-                    className="flex-1 py-2.5 bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-300 text-white text-xs font-extrabold rounded-xl transition-all flex items-center justify-center space-x-1.5 shadow-md shadow-indigo-500/10"
+                    className="flex-1 py-2.5 bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-300 text-white text-xs font-extrabold rounded-xl transition-all flex items-center justify-center space-x-1.5 shadow-md shadow-indigo-500/10 cursor-pointer"
                   >
                     {isSaving && <RefreshCw className="w-3.5 h-3.5 animate-spin" />}
-                    <span>{isSaving ? "등록 중..." : "예약 예약하기"}</span>
+                    <span>{isSaving ? "저장 중..." : (dailyReservations[`${activeBookingCell.room}_${activeBookingCell.period.id}`] ? "수정하기" : "예약하기")}</span>
                   </button>
                 </div>
 
@@ -1340,16 +1790,24 @@ export default function App() {
                   <button
                     onClick={() => setShowReservationDetail(null)}
                     disabled={isSaving}
-                    className="flex-1 py-2.5 border border-slate-200 hover:bg-slate-50 text-slate-600 text-xs font-bold rounded-xl transition-all"
+                    className="flex-1 py-2.5 border border-slate-200 hover:bg-slate-50 text-slate-600 text-xs font-bold rounded-xl transition-all cursor-pointer"
                   >
                     메뉴 닫기
                   </button>
                   <button
+                    onClick={startEditingReservation}
+                    disabled={isSaving}
+                    className="py-2.5 px-3.5 bg-indigo-50 border border-slate-100 text-indigo-600 hover:bg-indigo-100 text-xs font-extrabold rounded-xl transition-all flex items-center justify-center space-x-1 cursor-pointer"
+                  >
+                    <Edit2 className="w-3.5 h-3.5" />
+                    <span>예약 수정</span>
+                  </button>
+                  <button
                     onClick={() => cancelReservation(showReservationDetail.room, showReservationDetail.period.id)}
                     disabled={isSaving}
-                    className="py-2.5 px-4 bg-rose-50 border border-slate-100 text-rose-600 hover:bg-rose-100 text-xs font-extrabold rounded-xl transition-all flex items-center justify-center space-x-1.5"
+                    className="py-2.5 px-3.5 bg-rose-50 border border-slate-100 text-rose-600 hover:bg-rose-100 text-xs font-extrabold rounded-xl transition-all flex items-center justify-center space-x-1 cursor-pointer"
                   >
-                    <Trash2 className="w-4 h-4" />
+                    <Trash2 className="w-3.5 h-3.5" />
                     <span>예약 취소</span>
                   </button>
                 </div>
@@ -1637,6 +2095,24 @@ export default function App() {
                           />
                         </div>
 
+                        <div className="space-y-1">
+                          <label className="block text-xs font-bold text-slate-700">메인페이지 우측 창특별실 배치 열(Columns) 수</label>
+                          <select
+                            value={editGeneral.roomsPerRow || 3}
+                            onChange={(e) => setEditGeneral({ ...editGeneral, roomsPerRow: parseInt(e.target.value, 10) })}
+                            className="w-full p-2.5 text-xs text-slate-800 border border-slate-200 rounded-xl focus:outline-none focus:border-indigo-500 bg-white cursor-pointer"
+                          >
+                            <option value={1}>1열 배치</option>
+                            <option value={2}>2열 배치</option>
+                            <option value={3}>3열 배치 (기본값)</option>
+                            <option value={4}>4열 배치</option>
+                            <option value={6}>6열 배치</option>
+                          </select>
+                          <p className="text-[10px] text-slate-450 leading-relaxed">
+                            우측 메인 대시보드 창에 특별실 목록 카드를 한 줄(열)에 몇 개씩 보여줄지 지정합니다. (기본 3열)
+                          </p>
+                        </div>
+
                         {savingStatus && (
                           <p className="text-xs text-indigo-600 font-bold text-center mt-2 animate-bounce">
                             {savingStatus}
@@ -1680,19 +2156,70 @@ export default function App() {
                         {/* 특별실 목록 리스트 */}
                         <div className="space-y-2">
                           <label className="block text-xs font-extrabold text-slate-700">현재 등록된 특별실 목록</label>
-                          <p className="text-[10px] text-slate-400">삭제 시, 메인예약 보드 칼럼에도 실시간 업데이트됩니다.</p>
+                          <p className="text-[10px] text-slate-400">수정 / 삭제 시, 메인 예약 보드 칼럼에도 실시간 업데이트됩니다.</p>
                           
                           <div className="border border-slate-200 rounded-xl overflow-hidden divide-y divide-slate-100">
                             {settings.specialRooms.map((room) => (
-                              <div key={`room-list-${room}`} className="p-3 bg-white flex items-center justify-between text-xs">
-                                <span className="font-bold text-slate-800">{room}</span>
-                                <button
-                                  type="button"
-                                  onClick={() => removeSpecialRoom(room)}
-                                  className="p-1 hover:bg-rose-50 text-slate-400 hover:text-rose-600 rounded-lg transition-all"
-                                >
-                                  <Trash2 className="w-4 h-4" />
-                                </button>
+                              <div key={`room-list-${room}`} className="p-2.5 bg-white flex items-center justify-between text-xs min-h-[44px]">
+                                {editingRoom === room ? (
+                                  <div className="flex items-center gap-1.5 w-full">
+                                    <input
+                                      type="text"
+                                      value={editingRoomNameInput}
+                                      onChange={(e) => setEditingRoomNameInput(e.target.value)}
+                                      className="flex-1 px-2.5 py-1.5 text-xs text-slate-800 border border-indigo-300 rounded-lg focus:ring-1 focus:ring-indigo-500 outline-hidden bg-indigo-50/10 font-bold"
+                                      autoFocus
+                                      onKeyDown={(e) => {
+                                        if (e.key === 'Enter') {
+                                          saveEditedRoomName(room);
+                                        } else if (e.key === 'Escape') {
+                                          setEditingRoom(null);
+                                        }
+                                      }}
+                                    />
+                                    <button
+                                      type="button"
+                                      onClick={() => saveEditedRoomName(room)}
+                                      className="p-1.5 hover:bg-green-50 text-green-600 rounded-lg transition-all cursor-pointer"
+                                      title="저장"
+                                    >
+                                      <Check className="w-4 h-4" />
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => setEditingRoom(null)}
+                                      className="p-1.5 hover:bg-slate-100 text-slate-400 rounded-lg transition-all cursor-pointer"
+                                      title="취소"
+                                    >
+                                      <X className="w-4 h-4" />
+                                    </button>
+                                  </div>
+                                ) : (
+                                  <>
+                                    <span className="font-bold text-slate-800 pl-1">{room}</span>
+                                    <div className="flex items-center gap-1">
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          setEditingRoom(room);
+                                          setEditingRoomNameInput(room);
+                                        }}
+                                        className="p-1.5 hover:bg-indigo-50 text-slate-400 hover:text-indigo-650 rounded-lg transition-all cursor-pointer"
+                                        title="수정"
+                                      >
+                                        <Edit2 className="w-3.5 h-3.5" />
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => removeSpecialRoom(room)}
+                                        className="p-1.5 hover:bg-rose-50 text-slate-400 hover:text-rose-600 rounded-lg transition-all cursor-pointer"
+                                        title="삭제"
+                                      >
+                                        <Trash2 className="w-3.5 h-3.5" />
+                                      </button>
+                                    </div>
+                                  </>
+                                )}
                               </div>
                             ))}
                           </div>
@@ -1726,23 +2253,82 @@ export default function App() {
                         {/* 대상 목록 리스트 */}
                         <div className="space-y-2">
                           <label className="block text-xs font-extrabold text-slate-700">등록된 학급/교사 리스트</label>
+                          <p className="text-[10px] text-slate-400">학급명을 더블클릭하거나 우측 아이콘을 클릭하여 수정할 수 있습니다.</p>
                           
-                          <div className="border border-slate-200 rounded-xl bg-slate-50 p-2 max-h-[250px] overflow-y-auto grid grid-cols-2 gap-2">
+                          <div className="border border-slate-200 rounded-xl bg-slate-50 p-2 max-h-[300px] overflow-y-auto grid grid-cols-2 gap-2">
                             {settings.classes.map((className) => (
                               <div
                                 key={`class-list-${className}`}
-                                className="p-2 bg-white border border-slate-100 rounded-lg flex items-center justify-between text-xs shadow-2xs"
+                                className="p-2 bg-white border border-slate-100 rounded-lg flex items-center justify-between text-xs shadow-2xs min-h-[44px]"
                               >
-                                <span className="font-semibold text-slate-700 truncate w-[100px]">
-                                  {className}
-                                </span>
-                                <button
-                                  type="button"
-                                  onClick={() => removeClassItem(className)}
-                                  className="p-1 hover:bg-rose-50 text-slate-400 hover:text-rose-650 rounded-lg transition-all flex-shrink-0"
-                                >
-                                  <X className="w-3.5 h-3.5" />
-                                </button>
+                                {editingClass === className ? (
+                                  <div className="flex items-center gap-1 w-full">
+                                    <input
+                                      type="text"
+                                      value={editingClassNameInput}
+                                      onChange={(e) => setEditingClassNameInput(e.target.value)}
+                                      className="flex-1 px-1.5 py-1 text-xs text-slate-800 border border-indigo-300 rounded-lg focus:ring-1 focus:ring-indigo-500 outline-hidden bg-indigo-50/10 font-bold"
+                                      autoFocus
+                                      onKeyDown={(e) => {
+                                        if (e.key === 'Enter') {
+                                          saveEditedClassName(className);
+                                        } else if (e.key === 'Escape') {
+                                          setEditingClass(null);
+                                        }
+                                      }}
+                                    />
+                                    <button
+                                      type="button"
+                                      onClick={() => saveEditedClassName(className)}
+                                      className="p-1 hover:bg-green-50 text-green-600 rounded transition-all cursor-pointer flex-shrink-0"
+                                      title="저장"
+                                    >
+                                      <Check className="w-3.5 h-3.5" />
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => setEditingClass(null)}
+                                      className="p-1 hover:bg-slate-100 text-slate-400 rounded transition-all cursor-pointer flex-shrink-0"
+                                      title="취소"
+                                    >
+                                      <X className="w-3.5 h-3.5" />
+                                    </button>
+                                  </div>
+                                ) : (
+                                  <>
+                                    <span 
+                                      className="font-semibold text-slate-700 truncate max-w-[110px] cursor-pointer"
+                                      onDoubleClick={() => {
+                                        setEditingClass(className);
+                                        setEditingClassNameInput(className);
+                                      }}
+                                      title="더블클릭하여 수정 가능"
+                                    >
+                                      {className}
+                                    </span>
+                                    <div className="flex items-center gap-0.5">
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          setEditingClass(className);
+                                          setEditingClassNameInput(className);
+                                        }}
+                                        className="p-1.5 hover:bg-indigo-50 text-slate-400 hover:text-indigo-600 rounded-lg transition-all flex-shrink-0 cursor-pointer"
+                                        title="수정"
+                                      >
+                                        <Edit2 className="w-3.5 h-3.5" />
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => removeClassItem(className)}
+                                        className="p-1.5 hover:bg-rose-50 text-slate-400 hover:text-rose-600 rounded-lg transition-all flex-shrink-0 cursor-pointer"
+                                        title="삭제"
+                                      >
+                                        <X className="w-3.5 h-3.5" />
+                                      </button>
+                                    </div>
+                                  </>
+                                )}
                               </div>
                             ))}
                           </div>
@@ -1754,56 +2340,182 @@ export default function App() {
                     {/* 탭 본문 4. 기본 일과 관리 */}
                     {adminSectionTab === 'periods' && (
                       <div className="space-y-4 animate-fadeIn">
-                        <label className="block text-xs font-extrabold text-slate-700">학업 교시 정보와 시작/종료 시간 변경</label>
-                        <p className="text-[10px] text-slate-400">교시명 혹은 시간을 클릭 변경하시고, 예약 가능 여부를 체크박스로 변경하십시오.</p>
+                        <label className="block text-xs font-extrabold text-slate-700">새로운 일과(교시) 등록</label>
+                        <div className="p-3 bg-indigo-50/40 rounded-xl border border-indigo-100 flex flex-col sm:flex-row gap-2.5 items-end">
+                          <div className="flex-1 space-y-1 w-full">
+                            <span className="block text-[10px] font-bold text-slate-500">교시명</span>
+                            <input
+                              type="text"
+                              value={newPeriodName}
+                              onChange={(e) => setNewPeriodName(e.target.value)}
+                              placeholder="예: 7교시"
+                              className="w-full p-2 text-xs border border-slate-200 rounded-lg bg-white"
+                            />
+                          </div>
+                          <div className="w-full sm:w-[80px] space-y-1">
+                            <span className="block text-[10px] font-bold text-slate-500">시작 시간</span>
+                            <input
+                              type="text"
+                              value={newPeriodStartTime}
+                              onChange={(e) => setNewPeriodStartTime(e.target.value)}
+                              placeholder="15:10"
+                              className="w-full p-2 text-xs text-center border border-slate-200 rounded-lg bg-white font-mono"
+                            />
+                          </div>
+                          <div className="w-full sm:w-[80px] space-y-1">
+                            <span className="block text-[10px] font-bold text-slate-500">종료 시간</span>
+                            <input
+                              type="text"
+                              value={newPeriodEndTime}
+                              onChange={(e) => setNewPeriodEndTime(e.target.value)}
+                              placeholder="15:50"
+                              className="w-full p-2 text-xs text-center border border-slate-200 rounded-lg bg-white font-mono"
+                            />
+                          </div>
+                          <button
+                            type="button"
+                            onClick={addPeriodItem}
+                            className="w-full sm:w-auto px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold rounded-lg transition-all h-[38px] flex-shrink-0 cursor-pointer"
+                          >
+                            추가
+                          </button>
+                        </div>
+
+                        <div className="mt-4">
+                          <label className="block text-xs font-extrabold text-slate-700">기존 등록된 일과 목록 및 변경</label>
+                          <p className="text-[10px] text-slate-400">교시명 혹은 일과 시간을 우측 연필 수정 단추를 통해 변경 가능하며, 예약 가능 여부도 제어해 즉시 배정할 수 있습니다.</p>
+                        </div>
 
                         <div className="space-y-3">
                           {settings.periods.map((period) => (
                             <div
                               key={`period-manage-${period.id}`}
-                              className="p-3 border border-slate-200/80 rounded-xl bg-slate-50 space-y-2.5"
+                              className="p-3 border border-slate-200/80 rounded-xl bg-white space-y-2.5 shadow-2xs"
                             >
-                              <div className="flex items-center justify-between">
-                                <input
-                                  type="text"
-                                  value={period.name}
-                                  onChange={(e) => modifyPeriodTime(period.id, 'name', e.target.value)}
-                                  className="w-[80px] p-1 text-xs font-bold text-slate-800 bg-white border border-slate-200 rounded-md"
-                                />
+                              {editingPeriodId === period.id ? (
+                                <div className="space-y-3">
+                                  <div className="flex items-center justify-between gap-2.5">
+                                    <div className="flex-1">
+                                      <span className="block text-[10px] text-slate-400 font-bold mb-1">교시명</span>
+                                      <input
+                                        type="text"
+                                        value={editingPeriodNameInput}
+                                        onChange={(e) => setEditingPeriodNameInput(e.target.value)}
+                                        className="w-full p-2 text-xs font-bold text-slate-800 bg-indigo-50/10 border border-indigo-300 rounded-lg outline-hidden focus:ring-1 focus:ring-indigo-500 font-sans"
+                                        placeholder="예: 1교시"
+                                        autoFocus
+                                        onKeyDown={(e) => {
+                                          if (e.key === 'Enter') {
+                                            saveEditedPeriod(period.id);
+                                          } else if (e.key === 'Escape') {
+                                            setEditingPeriodId(null);
+                                          }
+                                        }}
+                                      />
+                                    </div>
+                                    <div className="flex items-end gap-1.5 pt-4">
+                                      <button
+                                        type="button"
+                                        onClick={() => saveEditedPeriod(period.id)}
+                                        className="p-2 hover:bg-green-50 text-green-600 rounded-lg transition-all cursor-pointer border border-green-200"
+                                        title="저장"
+                                      >
+                                        <Check className="w-4 h-4" />
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => setEditingPeriodId(null)}
+                                        className="p-2 hover:bg-slate-100 text-slate-450 rounded-lg transition-all cursor-pointer border border-slate-200"
+                                        title="취소"
+                                      >
+                                        <X className="w-4 h-4" />
+                                      </button>
+                                    </div>
+                                  </div>
 
-                                <label className="flex items-center space-x-1.5 cursor-pointer text-xs font-bold text-slate-700 select-none">
-                                  <input
-                                    type="checkbox"
-                                    checked={period.allowed}
-                                    onChange={() => togglePeriodAllowed(period.id, period.allowed)}
-                                    className="w-4 h-4 text-indigo-600 border-slate-300 rounded-sm focus:ring-indigo-500"
-                                  />
-                                  <span>예약 허용</span>
-                                </label>
-                              </div>
+                                  <div className="grid grid-cols-2 gap-2">
+                                    <div className="space-y-1">
+                                      <span className="block text-[10px] text-slate-400 font-extrabold uppercase">시작 시간</span>
+                                      <input
+                                        type="text"
+                                        value={editingPeriodStartTimeInput}
+                                        onChange={(e) => setEditingPeriodStartTimeInput(e.target.value)}
+                                        placeholder="09:00"
+                                        className="w-full p-2 text-xs text-center border border-slate-200 rounded-lg bg-white font-mono"
+                                        onKeyDown={(e) => {
+                                          if (e.key === 'Enter') saveEditedPeriod(period.id);
+                                        }}
+                                      />
+                                    </div>
+                                    <div className="space-y-1">
+                                      <span className="block text-[10px] text-slate-400 font-extrabold uppercase">종료 시간</span>
+                                      <input
+                                        type="text"
+                                        value={editingPeriodEndTimeInput}
+                                        onChange={(e) => setEditingPeriodEndTimeInput(e.target.value)}
+                                        placeholder="09:40"
+                                        className="w-full p-2 text-xs text-center border border-slate-200 rounded-lg bg-white font-mono"
+                                        onKeyDown={(e) => {
+                                          if (e.key === 'Enter') saveEditedPeriod(period.id);
+                                        }}
+                                      />
+                                    </div>
+                                  </div>
+                                </div>
+                              ) : (
+                                <>
+                                  <div className="flex items-center justify-between">
+                                    <div className="flex items-center gap-2">
+                                      <span className="p-1 px-2.5 bg-indigo-50 text-indigo-700 rounded-lg text-xs font-black">
+                                        {period.name}
+                                      </span>
+                                    </div>
 
-                              <div className="grid grid-cols-2 gap-2">
-                                <div className="space-y-1">
-                                  <span className="block text-[9px] text-slate-400 font-extrabold uppercase">시작 시간</span>
-                                  <input
-                                    type="text"
-                                    value={period.startTime}
-                                    onChange={(e) => modifyPeriodTime(period.id, 'startTime', e.target.value)}
-                                    placeholder="09:00"
-                                    className="w-full p-1.5 text-xs text-center border border-slate-200 rounded-lg bg-white"
-                                  />
-                                </div>
-                                <div className="space-y-1">
-                                  <span className="block text-[9px] text-slate-400 font-extrabold uppercase">종료 시간</span>
-                                  <input
-                                    type="text"
-                                    value={period.endTime}
-                                    onChange={(e) => modifyPeriodTime(period.id, 'endTime', e.target.value)}
-                                    placeholder="09:40"
-                                    className="w-full p-1.5 text-xs text-center border border-slate-200 rounded-lg bg-white"
-                                  />
-                                </div>
-                              </div>
+                                    <div className="flex items-center gap-3">
+                                      <label className="flex items-center space-x-1.5 cursor-pointer text-xs font-bold text-slate-605 select-none hover:text-indigo-600 transition-colors">
+                                        <input
+                                          type="checkbox"
+                                          checked={period.allowed}
+                                          onChange={() => togglePeriodAllowed(period.id, period.allowed)}
+                                          className="w-4 h-4 text-indigo-600 border-slate-300 rounded-sm focus:ring-indigo-500 cursor-pointer"
+                                        />
+                                        <span>예약 허용</span>
+                                      </label>
+
+                                      <div className="flex items-center gap-1">
+                                        <button
+                                          type="button"
+                                          onClick={() => {
+                                            setEditingPeriodId(period.id);
+                                            setEditingPeriodNameInput(period.name);
+                                            setEditingPeriodStartTimeInput(period.startTime);
+                                            setEditingPeriodEndTimeInput(period.endTime);
+                                          }}
+                                          className="p-1.5 hover:bg-indigo-50 text-slate-400 hover:text-indigo-600 rounded-lg transition-all cursor-pointer"
+                                          title="수정"
+                                        >
+                                          <Edit2 className="w-3.5 h-3.5" />
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={() => removePeriodItem(period.id)}
+                                          className="p-1.5 hover:bg-rose-50 text-slate-400 hover:text-rose-600 rounded-lg transition-all cursor-pointer"
+                                          title="삭제"
+                                        >
+                                          <Trash2 className="w-3.5 h-3.5" />
+                                        </button>
+                                      </div>
+                                    </div>
+                                  </div>
+
+                                  <div className="flex items-center justify-between bg-slate-50 rounded-lg p-2.5 text-xs border border-slate-100 font-medium">
+                                    <span className="text-slate-500 font-semibold">운영 시간</span>
+                                    <span className="text-slate-800 font-mono font-bold">
+                                      {period.startTime} ~ {period.endTime}
+                                    </span>
+                                  </div>
+                                </>
+                              )}
                             </div>
                           ))}
                         </div>
@@ -1829,6 +2541,99 @@ export default function App() {
                 </button>
               </div>
 
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* 글로벌 비차단 예쁜 슬라이드 토스트 배너 */}
+      <AnimatePresence>
+        {toastMessage && (
+          <motion.div
+            key="global-toast-banner"
+            initial={{ opacity: 0, scale: 0.9, y: 30 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            exit={{ opacity: 0, scale: 0.9, y: 30 }}
+            className="fixed bottom-6 right-6 z-[9999] flex items-center gap-3 px-4.5 py-3.5 rounded-2xl shadow-xl border bg-white max-w-sm"
+            style={{
+              borderColor: toastMessage.type === 'success' ? '#86efac' : '#fecaca',
+              backgroundColor: toastMessage.type === 'success' ? '#f0fdf4' : '#fff1f2',
+            }}
+          >
+            {toastMessage.type === 'success' ? (
+              <span className="p-1 px-1.5 bg-emerald-100 rounded-lg text-emerald-700 text-xs font-black">✓</span>
+            ) : (
+              <span className="p-1 px-1.5 bg-rose-100 rounded-lg text-rose-700 text-xs font-black">!</span>
+            )}
+            <p className="text-xs font-bold text-slate-800 leading-normal">{toastMessage.text}</p>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* 2차 커스텀 삭제 확인 팝업 (iFrame alert/confirm 차단 우회 보호용) */}
+      <AnimatePresence>
+        {deleteConfirmTarget && (
+          <div className="fixed inset-0 z-[9998] flex items-center justify-center p-4">
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setDeleteConfirmTarget(null)}
+              className="fixed inset-0 bg-slate-900/40 backdrop-blur-xs cursor-pointer"
+            />
+            
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0, y: 15 }}
+              animate={{ scale: 1, opacity: 1, y: 0 }}
+              exit={{ scale: 0.95, opacity: 0, y: 15 }}
+              className="bg-white rounded-2xl shadow-2xl border border-rose-100 max-w-md w-full relative z-10 overflow-hidden"
+            >
+              <div className="bg-rose-50 p-4 border-b border-rose-100">
+                <h4 className="text-sm font-black text-rose-700">
+                  ⚠ 특별실 예약 대여 취소 확인
+                </h4>
+              </div>
+              
+              <div className="p-5 space-y-4">
+                <p className="text-xs font-semibold text-slate-700 leading-relaxed">
+                  선택하신 <strong className="text-indigo-750">{deleteConfirmTarget.room}</strong>의 예약을 말소하고 반납하시겠습니까?
+                  <br />취소 시 동일 시간대에 다른 선생님이 신규로 예약을 신청하실 수 있게 개방됩니다.
+                </p>
+
+                {deleteConfirmTarget.res && (
+                  <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl space-y-1">
+                    <div className="flex items-center justify-between text-[11px]">
+                      <span className="text-slate-400 font-bold">대여 타겟</span>
+                      <span className="text-slate-700 font-black">{deleteConfirmTarget.res.teacherClass} {deleteConfirmTarget.res.teacherName} 선생님</span>
+                    </div>
+                    {deleteConfirmTarget.res.memo && (
+                      <div className="flex items-center justify-between text-[11px]">
+                        <span className="text-slate-400 font-bold">메모 목적</span>
+                        <span className="text-slate-500 italic font-semibold truncate max-w-[190px]">{deleteConfirmTarget.res.memo}</span>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                <div className="flex space-x-2 pt-2">
+                  <button
+                    type="button"
+                    onClick={() => setDeleteConfirmTarget(null)}
+                    className="flex-1 py-2.5 border border-slate-200 hover:bg-slate-50 text-slate-600 text-xs font-bold rounded-xl transition-all cursor-pointer"
+                  >
+                    아니오, 유지합니다
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => executeCancelReservation(deleteConfirmTarget.room, deleteConfirmTarget.periodId)}
+                    disabled={isSaving}
+                    className="flex-1 py-2.5 bg-rose-600 hover:bg-rose-700 disabled:bg-slate-300 text-white text-xs font-extrabold rounded-xl transition-all flex items-center justify-center space-x-1.5 shadow-md shadow-rose-500/10 cursor-pointer"
+                  >
+                    {isSaving && <RefreshCw className="w-3.5 h-3.5 animate-spin" />}
+                    <span>예, 취소합니다</span>
+                  </button>
+                </div>
+              </div>
             </motion.div>
           </div>
         )}
