@@ -1,0 +1,6 @@
+{
+  "name": "마산중앙초등학교 특별실 예약시스템",
+  "description": "마산중앙초등학교의 특별실 교시별 예약 현황을 실시간으로 확인하고 관리하는 웹 애플리케이션입니다.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

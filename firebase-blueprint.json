@@ -1,0 +1,62 @@
+{
+  "entities": {
+    "SettingsConfig": {
+      "title": "SettingsConfig",
+      "description": "Global settings for the Masan Jungang Elementary School Special Room Reservation System.",
+      "type": "object",
+      "properties": {
+        "appName": {
+          "type": "string",
+          "description": "The name of the application."
+        },
+        "appDescription": {
+          "type": "string",
+          "description": "Short description of the application."
+        },
+        "copyright": {
+          "type": "string",
+          "description": "Copyright notice displayed in the footer."
+        },
+        "contactEmail": {
+          "type": "string",
+          "description": "Support or admin contact email."
+        },
+        "specialRooms": {
+          "type": "array",
+          "description": "List of available special rooms."
+        },
+        "classes": {
+          "type": "array",
+          "description": "List of available classes/teachers for reservations."
+        },
+        "periods": {
+          "type": "array",
+          "description": "List of school periods with start/end time and booking toggle."
+        }
+      },
+      "required": ["appName", "appDescription", "copyright", "contactEmail", "specialRooms", "classes", "periods"]
+    },
+    "DailyReservations": {
+      "title": "DailyReservations",
+      "description": "All classroom reservations made on a single, specific date, indexed by a composite key.",
+      "type": "object",
+      "properties": {
+        "reservations": {
+          "type": "object",
+          "description": "A map from room_period compound ID (e.g., 'roomName_periodId') to the reservation detail object."
+        }
+      },
+      "required": ["reservations"]
+    }
+  },
+  "firestore": {
+    "/artifacts/classroom-reservation-79b25/public/data/settings/config": {
+      "schema": "SettingsConfig",
+      "description": "Single config document defining rooms, periods, school description, classes and custom fields."
+    },
+    "/artifacts/classroom-reservation-79b25/public/data/reservations/{dateStr}": {
+      "schema": "DailyReservations",
+      "description": "Daily bookings where dateStr is formatted as YYYY-MM-DD."
+    }
+  }
+}
