@@ -18,12 +18,15 @@ import {
   setDoc,
   onSnapshot,
   collection,
-  getDocFromServer
+  getDocFromServer,
+  getDocs
 } from 'firebase/firestore';
 import {
   Calendar as CalendarIcon,
   ChevronLeft,
   ChevronRight,
+  ChevronUp,
+  ChevronDown,
   Settings,
   Plus,
   Trash2,
@@ -43,7 +46,10 @@ import {
   Edit2,
   ArrowLeft,
   Columns,
-  Rows
+  Rows,
+  Download,
+  FileSpreadsheet,
+  GraduationCap
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 
@@ -322,7 +328,34 @@ export default function App() {
 
   // 상호작용 관련 (UI Interaction States)
   const [isSettingsOpen, setIsSettingsOpen] = useState<boolean>(false);
-  const [adminSectionTab, setAdminSectionTab] = useState<'info' | 'rooms' | 'classes' | 'periods' | 'timetable'>('info');
+  const [adminSectionTab, setAdminSectionTab] = useState<'info' | 'operation' | 'rooms' | 'classes' | 'periods' | 'timetable' | 'export'>('info');
+  
+  // CSV 데이터 내보내기/다운로드 관련 상태들
+  const [exportMode, setExportMode] = useState<'single' | 'range' | 'all'>('range');
+  const [exportSingleDate, setExportSingleDate] = useState<string>(() => {
+    const now = new Date();
+    const year = now.getFullYear();
+    const month = String(now.getMonth() + 1).padStart(2, '0');
+    const day = String(now.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+  });
+  const [exportStartDate, setExportStartDate] = useState<string>(() => {
+    const now = new Date();
+    const year = now.getFullYear();
+    const month = String(now.getMonth() + 1).padStart(2, '0');
+    return `${year}-${month}-01`;
+  });
+  const [exportEndDate, setExportEndDate] = useState<string>(() => {
+    const now = new Date();
+    const year = now.getFullYear();
+    const month = String(now.getMonth() + 1).padStart(2, '0');
+    const lastDay = new Date(year, now.getMonth() + 1, 0).getDate();
+    return `${year}-${month}-${String(lastDay).padStart(2, '0')}`;
+  });
+  const [exportIncludeDefault, setExportIncludeDefault] = useState<boolean>(false);
+  const [isExporting, setIsExporting] = useState<boolean>(false);
+  const [exportError, setExportError] = useState<string | null>(null);
+  const [exportSuccess, setExportSuccess] = useState<string | null>(null);
   const [activeBookingCell, setActiveBookingCell] = useState<{ room: string; period: Period } | null>(null);
   const [showReservationDetail, setShowReservationDetail] = useState<{ room: string; period: Period; res: Reservation } | null>(null);
   const [isSaving, setIsSaving] = useState<boolean>(false);
@@ -547,6 +580,11 @@ export default function App() {
 
     return () => unsub();
   }, [selectedDateStr, appId]);
+
+  // Sync export single date with main selected date
+  useEffect(() => {
+    setExportSingleDate(selectedDateStr);
+  }, [selectedDateStr]);
 
   // 5. Real-time Monthly Reservation Status (가벼운 전수 달력 도트 마킹용)
   useEffect(() => {
@@ -920,6 +958,291 @@ export default function App() {
     }
   };
 
+  // Helper for generating dates in a range safely
+  const getDatesInRange = (startStr: string, endStr: string): string[] => {
+    const dates: string[] = [];
+    const startObj = new Date(startStr);
+    const endObj = new Date(endStr);
+    
+    // 안전 장치: 최대 366일 내보내기 제한
+    let current = new Date(startObj);
+    let safetyCount = 0;
+    while (current <= endObj && safetyCount < 366) {
+      const year = current.getFullYear();
+      const month = String(current.getMonth() + 1).padStart(2, '0');
+      const day = String(current.getDate()).padStart(2, '0');
+      dates.push(`${year}-${month}-${day}`);
+      
+      current.setDate(current.getDate() + 1);
+      safetyCount++;
+    }
+    return dates;
+  };
+
+  // Helper to resolve merged reservations for any arbitrary date, mimicking active calendar logic
+  const getMergedReservationsForDate = (dateStr: string, dbReservations: Record<string, Reservation>) => {
+    const result: Record<string, Reservation> = {};
+    
+    // Parse date parts manually to avoid UTC daylight errors
+    const dateParts = dateStr.split('-');
+    const yr = parseInt(dateParts[0], 10);
+    const mo = parseInt(dateParts[1], 10) - 1;
+    const dy = parseInt(dateParts[2], 10);
+    const dateObj = new Date(yr, mo, dy);
+    const dayOfWeek = dateObj.getDay(); // 0(일)~6(토)
+    const isWeekday = dayOfWeek >= 1 && dayOfWeek <= 5;
+    
+    let isInVacation = false;
+    
+    // Summer Vacation
+    if (settings.vSummerActive && settings.vSummerStart && settings.vSummerEnd) {
+      if (dateStr >= settings.vSummerStart && dateStr <= settings.vSummerEnd) {
+        isInVacation = true;
+      }
+    }
+    // Winter Vacation
+    if (settings.vWinterActive && settings.vWinterStart && settings.vWinterEnd) {
+      if (dateStr >= settings.vWinterStart && dateStr <= settings.vWinterEnd) {
+        isInVacation = true;
+      }
+    }
+    // Spring Vacation
+    if (settings.vSpringActive && settings.vSpringStart && settings.vSpringEnd) {
+      if (dateStr >= settings.vSpringStart && dateStr <= settings.vSpringEnd) {
+        isInVacation = true;
+      }
+    }
+    
+    if (isWeekday && !isInVacation && settings.useDefaultTimetable && settings.dayTimeTable) {
+      const dayStr = String(dayOfWeek);
+      const dayData = settings.dayTimeTable[dayStr];
+      if (dayData) {
+        Object.entries(dayData).forEach(([room, periodsMap]) => {
+          Object.entries(periodsMap).forEach(([periodIdStr, cell]) => {
+            if (cell.teacherClass) {
+              const key = `${room}_${periodIdStr}`;
+              result[key] = {
+                teacherClass: cell.teacherClass,
+                teacherName: cell.teacherName || '기본',
+                memo: cell.memo || '고정 시간표',
+                reservedByUid: 'SYSTEM_DEFAULT',
+                reservedByName: '시스템',
+                createdAt: '',
+                isDefaultTimetable: true
+              };
+            }
+          });
+        });
+      }
+    }
+    
+    Object.entries(dbReservations || {}).forEach(([key, res]) => {
+      const reservation = res as any;
+      if (reservation.isCancelled) {
+        delete result[key];
+      } else {
+        result[key] = reservation as Reservation;
+      }
+    });
+    
+    return result;
+  };
+
+  const handleExportCSV = async () => {
+    if (!isAdmin) {
+      alert("관리자 권한이 없습니다.");
+      return;
+    }
+    
+    setIsExporting(true);
+    setExportError(null);
+    setExportSuccess(null);
+    
+    try {
+      const resColl = collection(db, 'school_reservations');
+      const querySnap = await getDocs(resColl);
+      
+      const dbData: Record<string, Record<string, Reservation>> = {};
+      querySnap.forEach((docSnap) => {
+        dbData[docSnap.id] = docSnap.data().reservations || {};
+      });
+
+      let dateList: string[] = [];
+      if (exportMode === 'single') {
+        if (!exportSingleDate) {
+          throw new Error("내보낼 날짜를 선택해 주세요.");
+        }
+        dateList = [exportSingleDate];
+      } else if (exportMode === 'range') {
+        if (!exportStartDate || !exportEndDate) {
+          throw new Error("시작 날짜와 종료 날짜를 모두 선택해 주세요.");
+        }
+        if (exportStartDate > exportEndDate) {
+          throw new Error("시작 날짜가 종료 날짜보다 나중일 수 없습니다.");
+        }
+        dateList = getDatesInRange(exportStartDate, exportEndDate);
+      } else {
+        const dbDates = Object.keys(dbData).sort();
+        if (exportIncludeDefault) {
+          if (dbDates.length === 0) {
+            const now = new Date();
+            const year = now.getFullYear();
+            const month = String(now.getMonth() + 1).padStart(2, '0');
+            const start = `${year}-${month}-01`;
+            const lastDay = new Date(year, now.getMonth() + 1, 0).getDate();
+            const end = `${year}-${month}-${String(lastDay).padStart(2, '0')}`;
+            dateList = getDatesInRange(start, end);
+          } else {
+            dateList = getDatesInRange(dbDates[0], dbDates[dbDates.length - 1]);
+          }
+        } else {
+          dateList = dbDates;
+        }
+      }
+
+      if (dateList.length === 0) {
+        throw new Error("선택한 조건에 해당하는 날짜가 존재하지 않습니다.");
+      }
+
+      interface CSVRow {
+        date: string;
+        room: string;
+        periodName: string;
+        periodId: string;
+        teacherClass: string;
+        teacherName: string;
+        memo: string;
+        createdAt: string;
+        isDefault: string;
+      }
+      const rows: CSVRow[] = [];
+
+      dateList.forEach((dateStr) => {
+        const dayDbReservations = dbData[dateStr] || {};
+        
+        let merged: Record<string, Reservation>;
+        if (exportIncludeDefault) {
+          merged = getMergedReservationsForDate(dateStr, dayDbReservations);
+        } else {
+          merged = {};
+          Object.entries(dayDbReservations).forEach(([key, res]) => {
+            if (!res.isCancelled) {
+              merged[key] = res;
+            }
+          });
+        }
+
+        Object.entries(merged).forEach(([compoundKey, res]) => {
+          let guessedRoom = '';
+          let guessedPeriodId = '';
+          let guessedPeriodName = '';
+
+          for (const room of settings.specialRooms || []) {
+            for (const period of settings.periods || []) {
+              if (compoundKey === `${room}_${period.id}`) {
+                guessedRoom = room;
+                guessedPeriodId = String(period.id);
+                guessedPeriodName = period.name;
+                break;
+              }
+            }
+            if (guessedRoom) break;
+          }
+
+          if (!guessedRoom) {
+            const lastUnderscore = compoundKey.lastIndexOf('_');
+            if (lastUnderscore !== -1) {
+              guessedRoom = compoundKey.substring(0, lastUnderscore);
+              guessedPeriodId = compoundKey.substring(lastUnderscore + 1);
+            } else {
+              guessedRoom = compoundKey;
+            }
+            const periodMatch = settings.periods?.find(p => String(p.id) === guessedPeriodId);
+            guessedPeriodName = periodMatch ? periodMatch.name : guessedPeriodId;
+          }
+
+          rows.push({
+            date: dateStr,
+            room: guessedRoom,
+            periodName: guessedPeriodName,
+            periodId: guessedPeriodId,
+            teacherClass: res.teacherClass || '',
+            teacherName: res.teacherName || '',
+            memo: res.memo || '',
+            createdAt: res.createdAt ? res.createdAt.substring(0, 19).replace('T', ' ') : '',
+            isDefault: res.isDefaultTimetable ? '기본고정' : '일반예약'
+          });
+        });
+      });
+
+      rows.sort((a, b) => {
+        if (a.date !== b.date) return a.date.localeCompare(b.date);
+        if (a.room !== b.room) return a.room.localeCompare(b.room);
+        const pA = parseInt(a.periodId, 10) || 0;
+        const pB = parseInt(b.periodId, 10) || 0;
+        return pA - pB;
+      });
+
+      if (rows.length === 0) {
+        throw new Error("해당 기간 및 조건에 저장된 예약 데이터가 없습니다.");
+      }
+
+      const headers = ['날짜', '특별실명', '교시', '학반(신청학급)', '예약 교사 성함', '예약 내용(메모)', '등록 일시', '예약 구분'];
+      
+      const escapeCSVValue = (val: string) => {
+        const cleaned = val.replace(/"/g, '""').replace(/\n/g, ' ').replace(/\r/g, '');
+        return `"${cleaned}"`;
+      };
+
+      const csvRows = [
+        headers.map(escapeCSVValue).join(',')
+      ];
+
+      rows.forEach((r) => {
+        const line = [
+          r.date,
+          r.room,
+          r.periodName,
+          r.teacherClass,
+          r.teacherName,
+          r.memo,
+          r.createdAt,
+          r.isDefault
+        ].map(escapeCSVValue).join(',');
+        csvRows.push(line);
+      });
+
+      const csvContent = '\uFEFF' + csvRows.join('\r\n');
+      
+      const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      
+      let filename = 'special_room_reservations';
+      if (exportMode === 'single') {
+        filename += `_${exportSingleDate}`;
+      } else if (exportMode === 'range') {
+        filename += `_${exportStartDate}_to_${exportEndDate}`;
+      } else {
+        filename += `_all_history`;
+      }
+      filename += '.csv';
+
+      link.setAttribute("href", url);
+      link.setAttribute("download", filename);
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      
+      setExportSuccess(`성공적으로 ${rows.length}건의 예약을 파일(${filename})로 다운로드 완료했습니다!`);
+    } catch (err: any) {
+      console.error("CSV 내보내기 에러:", err);
+      setExportError(err.message || '데이터 내보내기 중 문제가 발생했습니다.');
+    } finally {
+      setIsExporting(false);
+    }
+  };
+
   const toggleLayoutDirection = async () => {
     if (!isAdmin) return;
     const newDir = settings.layoutDirection === 'col' ? 'row' : 'col';
@@ -1003,6 +1326,29 @@ export default function App() {
     } catch (error: any) {
       console.error("특별실 이름 수정 에러:", error);
       alert("특별실 이름 수정 권한이 없습니다.");
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const moveSpecialRoom = async (index: number, direction: 'up' | 'down') => {
+    if (!isAdmin) return;
+    const targetIndex = direction === 'up' ? index - 1 : index + 1;
+    if (targetIndex < 0 || targetIndex >= settings.specialRooms.length) return;
+
+    setIsSaving(true);
+    const newList = [...settings.specialRooms];
+    // swap elements
+    const temp = newList[index];
+    newList[index] = newList[targetIndex];
+    newList[targetIndex] = temp;
+
+    try {
+      const settingsRef = doc(db, 'school_settings', 'config');
+      await setDoc(settingsRef, { specialRooms: newList }, { merge: true });
+    } catch (error: any) {
+      console.error("특별실 순서 변경 에러:", error);
+      alert("특별실 순서 변경 권한이 없습니다.");
     } finally {
       setIsSaving(false);
     }
@@ -2425,13 +2771,14 @@ export default function App() {
                     </div>
 
                     {/* 어드민 네비게이션 탭 */}
-                    <div className="border-b border-slate-200/80 flex space-x-2">
+                    <div className="border-b border-slate-200/80 flex space-x-2 overflow-x-auto select-none scrollbar-none">
                       {[
                         { id: 'info', label: '기본 정보', icon: Sliders },
+                        { id: 'operation', label: '학사 운영', icon: GraduationCap },
                         { id: 'rooms', label: '특별실 설정', icon: MapPin },
                         { id: 'classes', label: '신청학급', icon: BookOpen },
                         { id: 'periods', label: '기본일과', icon: Clock },
-                        { id: 'timetable', label: '기본 시간표', icon: CalendarIcon }
+                        { id: 'export', label: '데이터 내보내기', icon: FileSpreadsheet }
                       ].map((tab) => {
                         const Icon = tab.icon;
                         const isTabActive = adminSectionTab === tab.id;
@@ -2495,6 +2842,45 @@ export default function App() {
                           />
                         </div>
 
+                        <div className="space-y-1">
+                          <label className="block text-xs font-bold text-slate-700">메인페이지 우측 창특별실 배치 열(Columns) 수</label>
+                          <select
+                            value={editGeneral.roomsPerRow || 3}
+                            onChange={(e) => setEditGeneral({ ...editGeneral, roomsPerRow: parseInt(e.target.value, 10) })}
+                            className="w-full p-2.5 text-xs text-slate-800 border border-slate-200 rounded-xl focus:outline-none focus:border-indigo-500 bg-white cursor-pointer"
+                          >
+                            <option value={1}>1열 배치</option>
+                            <option value={2}>2열 배치</option>
+                            <option value={3}>3열 배치 (기본값)</option>
+                            <option value={4}>4열 배치</option>
+                            <option value={6}>6열 배치</option>
+                          </select>
+                          <p className="text-[10px] text-slate-450 leading-relaxed">
+                            우측 메인 대시보드 창에 특별실 목록 카드를 한 줄(열)에 몇 개씩 보여줄지 지정합니다. (기본 3열)
+                          </p>
+                        </div>
+
+                        {savingStatus && (
+                          <p className="text-xs text-indigo-600 font-bold text-center mt-2 animate-bounce">
+                            {savingStatus}
+                          </p>
+                        )}
+
+                        <button
+                          type="button"
+                          onClick={saveGeneralSettings}
+                          disabled={isSaving}
+                          className="w-full py-2.5 bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-300 text-white text-xs font-extrabold rounded-xl transition-all shadow-md shadow-indigo-500/10 flex items-center justify-center space-x-1.5"
+                        >
+                          {isSaving && <RefreshCw className="w-4 h-4 animate-spin" />}
+                          <span>일반 및 기본 정보 실시간 저장</span>
+                        </button>
+                      </div>
+                    )}
+
+                    {/* 탭 본문 1-2. 학사 운영 설정 */}
+                    {adminSectionTab === 'operation' && (
+                      <div className="space-y-4 animate-fadeIn">
                         <div className="grid grid-cols-2 gap-3 bg-slate-50 p-3 rounded-xl border border-slate-200/80">
                           <div className="space-y-1 col-span-2">
                             <span className="text-[10px] uppercase tracking-wider font-extrabold text-indigo-450 block">학사 운영 정보 설정</span>
@@ -2522,8 +2908,8 @@ export default function App() {
                               const isLeap = (nextYr % 4 === 0 && nextYr % 100 !== 0) || (nextYr % 400 === 0);
                               const febEndDay = isLeap ? '29일' : '28일';
                               return (
-                                <div className="text-[10px] text-indigo-700/80 font-bold bg-indigo-50 p-2.5 rounded-lg border border-indigo-100 flex items-center gap-1.5 leading-relaxed">
-                                  <span className="w-1.5 h-1.5 rounded-full bg-indigo-500 inline-block animate-ping" />
+                                <div className="text-[10px] text-indigo-700/80 font-bold bg-indigo-50 p-2.5 rounded-lg border border-indigo-100 flex items-center gap-1.5 leading-relaxed font-semibold">
+                                  <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 inline-block animate-ping" />
                                   <span>학사 운영 기간: {yr}년 3월 1일 ~ {nextYr}년 2월 {febEndDay}까지 (자동 조정)</span>
                                 </div>
                               );
@@ -2531,7 +2917,7 @@ export default function App() {
                           </div>
 
                           {/* 기본시간표 적용 버튼 토글 */}
-                          <div className="col-span-2 p-2.5 bg-indigo-50/35 rounded-xl border border-indigo-100/80 flex items-center justify-between mt-1">
+                          <div className="col-span-2 p-2.5 bg-indigo-50/35 rounded-xl border border-indigo-100/85 flex items-center justify-between mt-1">
                             <div className="max-w-[75%]">
                               <span className="text-[11px] font-black text-indigo-900 block">기본 시간표 시스템 적용</span>
                               <span className="text-[9px] text-slate-500 leading-tight block mt-0.5">
@@ -2586,7 +2972,7 @@ export default function App() {
                                 />
                               </div>
                               <div className="space-y-0.5">
-                                <label className="text-[9px] font-bold text-slate-450 block">종료일</label>
+                                <label className="text-[9px] font-bold text-slate-455 block">종료일</label>
                                 <input
                                   type="date"
                                   disabled={!editGeneral.vSummerActive}
@@ -2627,7 +3013,7 @@ export default function App() {
                                 />
                               </div>
                               <div className="space-y-0.5">
-                                <label className="text-[9px] font-bold text-slate-450 block">종료일</label>
+                                <label className="text-[9px] font-bold text-slate-455 block">종료일</label>
                                 <input
                                   type="date"
                                   disabled={!editGeneral.vWinterActive}
@@ -2658,7 +3044,7 @@ export default function App() {
                             </div>
                             <div className="grid grid-cols-2 gap-2">
                               <div className="space-y-0.5">
-                                <label className="text-[9px] font-bold text-slate-450 block">시작일</label>
+                                <label className="text-[9px] font-bold text-slate-455 block">시작일</label>
                                 <input
                                   type="date"
                                   disabled={!editGeneral.vSpringActive}
@@ -2668,7 +3054,7 @@ export default function App() {
                                 />
                               </div>
                               <div className="space-y-0.5">
-                                <label className="text-[9px] font-bold text-slate-450 block">종료일</label>
+                                <label className="text-[9px] font-bold text-slate-455 block">종료일</label>
                                 <input
                                   type="date"
                                   disabled={!editGeneral.vSpringActive}
@@ -2681,24 +3067,6 @@ export default function App() {
                           </div>
                         </div>
 
-                        <div className="space-y-1">
-                          <label className="block text-xs font-bold text-slate-700">메인페이지 우측 창특별실 배치 열(Columns) 수</label>
-                          <select
-                            value={editGeneral.roomsPerRow || 3}
-                            onChange={(e) => setEditGeneral({ ...editGeneral, roomsPerRow: parseInt(e.target.value, 10) })}
-                            className="w-full p-2.5 text-xs text-slate-800 border border-slate-200 rounded-xl focus:outline-none focus:border-indigo-500 bg-white cursor-pointer"
-                          >
-                            <option value={1}>1열 배치</option>
-                            <option value={2}>2열 배치</option>
-                            <option value={3}>3열 배치 (기본값)</option>
-                            <option value={4}>4열 배치</option>
-                            <option value={6}>6열 배치</option>
-                          </select>
-                          <p className="text-[10px] text-slate-450 leading-relaxed">
-                            우측 메인 대시보드 창에 특별실 목록 카드를 한 줄(열)에 몇 개씩 보여줄지 지정합니다. (기본 3열)
-                          </p>
-                        </div>
-
                         {savingStatus && (
                           <p className="text-xs text-indigo-600 font-bold text-center mt-2 animate-bounce">
                             {savingStatus}
@@ -2709,11 +3077,145 @@ export default function App() {
                           type="button"
                           onClick={saveGeneralSettings}
                           disabled={isSaving}
-                          className="w-full py-2.5 bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-300 text-white text-xs font-extrabold rounded-xl transition-all shadow-md shadow-indigo-500/10 flex items-center justify-center space-x-1.5"
+                          className="w-full py-2.5 bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-300 text-white text-xs font-extrabold rounded-xl transition-all shadow-md shadow-indigo-500/10 flex items-center justify-center space-x-1.5 cursor-pointer"
                         >
                           {isSaving && <RefreshCw className="w-4 h-4 animate-spin" />}
-                          <span>일반 및 기본 정보 실시간 저장</span>
+                          <span>학사 운영 및 방학 설정 저장</span>
                         </button>
+
+                        <div className="border-t border-slate-200/80 my-5 pt-5" />
+
+                        {/* 요일 및 특별실별 기본 배치 시간표 */}
+                        <div className="space-y-4">
+                          <div>
+                            <label className="block text-xs font-extrabold text-slate-700">요일 및 특별실별 기본 배치 시간표</label>
+                            <p className="text-[10px] text-slate-400 leading-relaxed">
+                              매 주 반복되는 학급별 고정 특별실 사용 시간표를 설정합니다. 이 기본 시간표는 <b>방학 기간이 아닌 학기(평일)</b>에 자동으로 달력에 연동되어 반영됩니다. 각 칸의 학급, 교사명, 메모를 선택/입력하면 즉시 실시간 자동 저장됩니다.
+                            </p>
+                          </div>
+
+                          {/* 요일 선택 탭 */}
+                          <div className="flex bg-slate-100 p-1 rounded-xl">
+                            {[
+                              { key: '1', name: '월요일' },
+                              { key: '2', name: '화요일' },
+                              { key: '3', name: '수요일' },
+                              { key: '4', name: '목요일' },
+                              { key: '5', name: '금요일' },
+                            ].map((d) => (
+                              <button
+                                key={`tt-day-${d.key}`}
+                                type="button"
+                                onClick={() => setTimetableDay(d.key)}
+                                className={`flex-1 py-1.5 text-xs font-bold rounded-lg transition-all ${
+                                  timetableDay === d.key
+                                    ? 'bg-white text-indigo-600 shadow-xs font-black'
+                                    : 'text-slate-500 hover:text-slate-800'
+                                }`}
+                              >
+                                {d.name}
+                              </button>
+                            ))}
+                          </div>
+
+                          {/* 특별실 선택과 초기화 버튼 */}
+                          <div className="flex flex-col sm:flex-row gap-2 items-end sm:items-center justify-between">
+                            <div className="flex-1 w-full space-y-1">
+                              <span className="block text-[10px] font-bold text-slate-500">대상 특별실 선택</span>
+                              <select
+                                value={timetableRoom || settings.specialRooms[0] || ''}
+                                onChange={(e) => setTimetableRoom(e.target.value)}
+                                className="w-full p-2.5 text-xs text-slate-800 border border-slate-200 rounded-xl focus:outline-none focus:border-indigo-500 bg-white font-bold cursor-pointer"
+                              >
+                                {settings.specialRooms.map((room) => (
+                                  <option key={`tt-room-select-${room}`} value={room}>{room}</option>
+                                ))}
+                              </select>
+                            </div>
+
+                            <button
+                              type="button"
+                              onClick={() => clearDayTimetable(timetableDay, timetableRoom || settings.specialRooms[0] || '')}
+                              className="w-full sm:w-auto px-4 py-2.5 bg-rose-50 hover:bg-rose-100 text-rose-600 text-xs font-bold rounded-xl transition-all border border-rose-100 flex items-center justify-center gap-1 cursor-pointer h-[42px] sm:self-end"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                              <span>해당 교시 무효화/초기화</span>
+                            </button>
+                          </div>
+
+                          {savingStatus && (
+                            <div className="text-center">
+                              <span className="inline-flex items-center gap-1.5 bg-indigo-50 text-indigo-700 text-[10px] font-bold px-2 py-1 rounded-full border border-indigo-100 animate-pulse">
+                                <RefreshCw className="w-3 h-3 animate-spin animate-infinite duration-1000" />
+                                {savingStatus}
+                              </span>
+                            </div>
+                          )}
+
+                          {/* 시간표 입력 격자 구조 */}
+                          <div className="space-y-3 mt-4">
+                            {settings.periods.filter(p => p.allowed).map((period) => {
+                              const curRoom = timetableRoom || settings.specialRooms[0] || '';
+                              const cell = settings.dayTimeTable?.[timetableDay]?.[curRoom]?.[String(period.id)] || { teacherClass: '', teacherName: '', memo: '' };
+
+                              return (
+                                <div
+                                  key={`tt-cell-${period.id}`}
+                                  className="p-3 border border-slate-200/80 rounded-xl bg-white space-y-2.5 shadow-2xs"
+                                >
+                                  <div className="flex items-center justify-between">
+                                    <span className="p-1 px-2.5 bg-indigo-50 text-indigo-700 rounded-lg text-xs font-black">
+                                      {period.name} ({period.startTime} ~ {period.endTime})
+                                    </span>
+                                    {cell.teacherClass && (
+                                      <span className="text-[10px] font-bold text-green-600 bg-green-50 px-2 py-0.5 rounded-md">
+                                        배정 완료
+                                      </span>
+                                    )}
+                                  </div>
+
+                                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                                    <div className="space-y-1">
+                                      <span className="block text-[10px] text-slate-400 font-bold">배정 학급</span>
+                                      <select
+                                        value={cell.teacherClass || ''}
+                                        onChange={(e) => updateTimetableCell(timetableDay, curRoom, period.id, 'teacherClass', e.target.value)}
+                                        className="w-full p-2 text-xs border border-slate-200 rounded-lg bg-white font-semibold cursor-pointer"
+                                      >
+                                        <option value="">미배정 (공석)</option>
+                                        {settings.classes.map((cl) => (
+                                          <option key={`tt-cell-class-${period.id}-${cl}`} value={cl}>{cl}</option>
+                                        ))}
+                                      </select>
+                                    </div>
+
+                                    <div className="space-y-1">
+                                      <span className="block text-[10px] text-slate-400 font-bold">교사명</span>
+                                      <input
+                                        type="text"
+                                        value={cell.teacherName || ''}
+                                        placeholder="직접 입력"
+                                        onChange={(e) => updateTimetableCell(timetableDay, curRoom, period.id, 'teacherName', e.target.value)}
+                                        className="w-full p-2 text-xs border border-slate-200 rounded-lg bg-white"
+                                      />
+                                    </div>
+
+                                    <div className="space-y-1">
+                                      <span className="block text-[10px] text-slate-400 font-bold">사용 메모</span>
+                                      <input
+                                        type="text"
+                                        value={cell.memo || ''}
+                                        placeholder="활동 목적 등"
+                                        onChange={(e) => updateTimetableCell(timetableDay, curRoom, period.id, 'memo', e.target.value)}
+                                        className="w-full p-2 text-xs border border-slate-200 rounded-lg bg-white"
+                                      />
+                                    </div>
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
                       </div>
                     )}
 
@@ -2745,7 +3247,7 @@ export default function App() {
                           <p className="text-[10px] text-slate-400">수정 / 삭제 시, 메인 예약 보드 칼럼에도 실시간 업데이트됩니다.</p>
                           
                           <div className="border border-slate-200 rounded-xl overflow-hidden divide-y divide-slate-100">
-                            {settings.specialRooms.map((room) => (
+                            {settings.specialRooms.map((room, idx) => (
                               <div key={`room-list-${room}`} className="p-2.5 bg-white flex items-center justify-between text-xs min-h-[44px]">
                                 {editingRoom === room ? (
                                   <div className="flex items-center gap-1.5 w-full">
@@ -2783,7 +3285,29 @@ export default function App() {
                                 ) : (
                                   <>
                                     <span className="font-bold text-slate-800 pl-1">{room}</span>
-                                    <div className="flex items-center gap-1">
+                                    <div className="flex items-center gap-1 bg-slate-50 p-1 rounded-lg border border-slate-250/20">
+                                      {/* 순서 조정 버튼들 */}
+                                      <button
+                                        type="button"
+                                        disabled={idx === 0 || isSaving}
+                                        onClick={() => moveSpecialRoom(idx, 'up')}
+                                        className="p-1 hover:bg-slate-200 text-slate-400 hover:text-slate-800 disabled:opacity-30 rounded transition-all cursor-pointer"
+                                        title="위로 이동"
+                                      >
+                                        <ChevronUp className="w-3.5 h-3.5" />
+                                      </button>
+                                      <button
+                                        type="button"
+                                        disabled={idx === settings.specialRooms.length - 1 || isSaving}
+                                        onClick={() => moveSpecialRoom(idx, 'down')}
+                                        className="p-1 hover:bg-slate-200 text-slate-400 hover:text-slate-800 disabled:opacity-30 rounded transition-all cursor-pointer"
+                                        title="아래로 이동"
+                                      >
+                                        <ChevronDown className="w-3.5 h-3.5" />
+                                      </button>
+                                      
+                                      <div className="w-px h-3.5 bg-slate-200 mx-1" />
+
                                       <button
                                         type="button"
                                         onClick={() => {
@@ -3108,137 +3632,157 @@ export default function App() {
                       </div>
                     )}
 
-                    {/* 탭 본문 5. 특별실 활용 기본 시간표 */}
-                    {adminSectionTab === 'timetable' && (
+                    {/* 탭 본문 6. 예약 데이터 CSV 내보내기 */}
+                    {adminSectionTab === 'export' && (
                       <div className="space-y-4 animate-fadeIn">
                         <div>
-                          <label className="block text-xs font-extrabold text-slate-700">요일 및 특별실별 기본 배치 시간표</label>
+                          <label className="block text-xs font-extrabold text-slate-700">예약 데이터 CSV 다운로드</label>
                           <p className="text-[10px] text-slate-400 leading-relaxed">
-                            매 주 반복되는 학급별 고정 특별실 사용 시간표를 설정합니다. 이 기본 시간표는 <b>방학 기간이 아닌 학기(평일)</b>에 자동으로 달력에 연동되어 반영됩니다. 각 칸의 학급, 교사명, 메모를 선택/입력하면 즉시 실시간 자동 저장됩니다.
+                            선택한 날짜 또는 기간 동안의 예약 데이터 명세를 CSV 파일 형식으로 일괄 추출하여 다운로드합니다. 이 파일은 Microsoft Excel 또는 다른 스프레드시트 소프트웨어에서 가공하고 인쇄할 수 있습니다.
                           </p>
                         </div>
 
-                        {/* 요일 선택 탭 */}
-                        <div className="flex bg-slate-100 p-1 rounded-xl">
-                          {[
-                            { key: '1', name: '월요일' },
-                            { key: '2', name: '화요일' },
-                            { key: '3', name: '수요일' },
-                            { key: '4', name: '목요일' },
-                            { key: '5', name: '금요일' },
-                          ].map((d) => (
-                            <button
-                              key={`tt-day-${d.key}`}
-                              type="button"
-                              onClick={() => setTimetableDay(d.key)}
-                              className={`flex-1 py-1.5 text-xs font-bold rounded-lg transition-all ${
-                                timetableDay === d.key
-                                  ? 'bg-white text-indigo-600 shadow-xs font-black'
-                                  : 'text-slate-500 hover:text-slate-800'
-                              }`}
-                            >
-                              {d.name}
-                            </button>
-                          ))}
-                        </div>
-
-                        {/* 특별실 선택과 초기화 버튼 */}
-                        <div className="flex flex-col sm:flex-row gap-2 items-end sm:items-center justify-between">
-                          <div className="flex-1 w-full space-y-1">
-                            <span className="block text-[10px] font-bold text-slate-500">대상 특별실 선택</span>
-                            <select
-                              value={timetableRoom || settings.specialRooms[0] || ''}
-                              onChange={(e) => setTimetableRoom(e.target.value)}
-                              className="w-full p-2.5 text-xs text-slate-800 border border-slate-200 rounded-xl focus:outline-none focus:border-indigo-500 bg-white font-bold cursor-pointer"
-                            >
-                              {settings.specialRooms.map((room) => (
-                                <option key={`tt-room-select-${room}`} value={room}>{room}</option>
-                              ))}
-                            </select>
+                        {/* 추출 범위 선택 */}
+                        <div className="space-y-3 bg-slate-50 border border-slate-100 rounded-2xl p-4">
+                          <label className="block text-xs font-bold text-slate-700">1. 대상 범위 선택</label>
+                          <div className="grid grid-cols-3 gap-2">
+                            {[
+                              { id: 'single', label: '특정 날짜' },
+                              { id: 'range', label: '기간 지정' },
+                              { id: 'all', label: '전체 데이터' }
+                            ].map((mode) => (
+                              <button
+                                key={`export-mode-${mode.id}`}
+                                type="button"
+                                onClick={() => {
+                                  setExportMode(mode.id as any);
+                                  setExportError(null);
+                                  setExportSuccess(null);
+                                }}
+                                className={`py-2 text-xs font-bold rounded-xl border transition-all ${
+                                  exportMode === mode.id
+                                    ? 'bg-slate-900 border-slate-900 text-white shadow-xs'
+                                    : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50'
+                                }`}
+                              >
+                                {mode.label}
+                              </button>
+                            ))}
                           </div>
 
-                          <button
-                            type="button"
-                            onClick={() => clearDayTimetable(timetableDay, timetableRoom || settings.specialRooms[0] || '')}
-                            className="w-full sm:w-auto px-4 py-2.5 bg-rose-50 hover:bg-rose-100 text-rose-600 text-xs font-bold rounded-xl transition-all border border-rose-100 flex items-center justify-center gap-1 cursor-pointer h-[42px] sm:self-end"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                            <span>해당 교시 무효화/초기화</span>
-                          </button>
+                          {/* 특정 날짜 선택 */}
+                          {exportMode === 'single' && (
+                            <div className="space-y-1.5 animate-fadeIn">
+                              <label className="block text-[10.5px] font-bold text-slate-500">지정 날짜</label>
+                              <input
+                                type="date"
+                                value={exportSingleDate}
+                                onChange={(e) => {
+                                  setExportSingleDate(e.target.value);
+                                  setExportError(null);
+                                  setExportSuccess(null);
+                                }}
+                                className="w-full p-2.5 text-xs text-slate-800 border border-slate-200 rounded-xl focus:outline-none focus:border-indigo-500 bg-white font-semibold"
+                              />
+                            </div>
+                          )}
+
+                          {/* 기간 지정 */}
+                          {exportMode === 'range' && (
+                            <div className="grid grid-cols-2 gap-2.5 animate-fadeIn">
+                              <div className="space-y-1.5">
+                                <label className="block text-[10.5px] font-bold text-slate-500">시작일</label>
+                                <input
+                                  type="date"
+                                  value={exportStartDate}
+                                  onChange={(e) => {
+                                    setExportStartDate(e.target.value);
+                                    setExportError(null);
+                                    setExportSuccess(null);
+                                  }}
+                                  className="w-full p-2.5 text-xs text-slate-800 border border-slate-200 rounded-xl focus:outline-none focus:border-indigo-500 bg-white font-semibold"
+                                />
+                              </div>
+                              <div className="space-y-1.5">
+                                <label className="block text-[10.5px] font-bold text-slate-500">종료일</label>
+                                <input
+                                  type="date"
+                                  value={exportEndDate}
+                                  onChange={(e) => {
+                                    setExportEndDate(e.target.value);
+                                    setExportError(null);
+                                    setExportSuccess(null);
+                                  }}
+                                  className="w-full p-2.5 text-xs text-slate-800 border border-slate-200 rounded-xl focus:outline-none focus:border-indigo-500 bg-white font-semibold"
+                                />
+                              </div>
+                            </div>
+                          )}
+
+                          {/* 전체 데이터 */}
+                          {exportMode === 'all' && (
+                            <div className="p-3 bg-indigo-50 border border-indigo-100/50 rounded-xl animate-fadeIn">
+                              <p className="text-[10px] text-indigo-750 leading-relaxed font-bold">
+                                데이터베이스에 등록된 전체 기록 전수를 일괄 추출합니다. 전체 이력 조회 작업이므로 데이터가 많을 경우 처리에 다소 시간이 소요될 수 있습니다.
+                              </p>
+                            </div>
+                          )}
                         </div>
 
-                        {savingStatus && (
-                          <div className="text-center">
-                            <span className="inline-flex items-center gap-1.5 bg-indigo-50 text-indigo-700 text-[10px] font-bold px-2 py-1 rounded-full border border-indigo-100 animate-pulse">
-                              <RefreshCw className="w-3 h-3 animate-spin animate-infinite duration-1000" />
-                              {savingStatus}
-                            </span>
+                        {/* 옵션 선택 */}
+                        <div className="space-y-3 bg-slate-50 border border-slate-100 rounded-2xl p-4">
+                          <label className="block text-xs font-bold text-slate-700">2. 추출 세부 옵션</label>
+                          <label className="flex items-center space-x-2.5 cursor-pointer p-1">
+                            <input
+                              type="checkbox"
+                              checked={exportIncludeDefault}
+                              onChange={(e) => {
+                                setExportIncludeDefault(e.target.checked);
+                                setExportError(null);
+                                setExportSuccess(null);
+                              }}
+                              className="checkbox-custom rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+                            />
+                            <div className="flex flex-col">
+                              <span className="text-xs font-black text-slate-700">정규 교육과정 고정 수업 시간표 포함 (요일별)</span>
+                              <span className="text-[9.5px] text-slate-400">설정된 요일별 고정 배정 수업 데이터도 예약 내역에 함께 병합하여 다운로드합니다.</span>
+                            </div>
+                          </label>
+                        </div>
+
+                        {/* 진행 결과 / 에러 / 성공 가이드 */}
+                        {exportError && (
+                          <div className="bg-rose-50 border border-rose-100 rounded-xl p-3 text-[11px] font-bold text-rose-600 flex items-start gap-2 animate-fadeIn font-semibold leading-normal">
+                            <AlertCircle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
+                            <span>{exportError}</span>
+                          </div>
+                        )}
+                        {exportSuccess && (
+                          <div className="bg-emerald-50 border border-emerald-100 rounded-xl p-3 text-[11px] font-bold text-emerald-700 flex items-start gap-2 animate-fadeIn font-semibold leading-normal">
+                            <Check className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
+                            <span>{exportSuccess}</span>
                           </div>
                         )}
 
-                        {/* 시간표 입력 격자 구조 */}
-                        <div className="space-y-3 mt-4">
-                          {settings.periods.filter(p => p.allowed).map((period) => {
-                            const curRoom = timetableRoom || settings.specialRooms[0] || '';
-                            const cell = settings.dayTimeTable?.[timetableDay]?.[curRoom]?.[String(period.id)] || { teacherClass: '', teacherName: '', memo: '' };
-
-                            return (
-                              <div
-                                key={`tt-cell-${period.id}`}
-                                className="p-3 border border-slate-200/80 rounded-xl bg-white space-y-2.5 shadow-2xs"
-                              >
-                                <div className="flex items-center justify-between">
-                                  <span className="p-1 px-2.5 bg-indigo-50 text-indigo-700 rounded-lg text-xs font-black">
-                                    {period.name} ({period.startTime} ~ {period.endTime})
-                                  </span>
-                                  {cell.teacherClass && (
-                                    <span className="text-[10px] font-bold text-green-600 bg-green-50 px-2 py-0.5 rounded-md">
-                                      배정 완료
-                                    </span>
-                                  )}
-                                </div>
-
-                                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-                                  <div className="space-y-1">
-                                    <span className="block text-[10px] text-slate-400 font-bold">배정 학급</span>
-                                    <select
-                                      value={cell.teacherClass || ''}
-                                      onChange={(e) => updateTimetableCell(timetableDay, curRoom, period.id, 'teacherClass', e.target.value)}
-                                      className="w-full p-2 text-xs border border-slate-200 rounded-lg bg-white font-semibold cursor-pointer"
-                                    >
-                                      <option value="">미배정 (공석)</option>
-                                      {settings.classes.map((cl) => (
-                                        <option key={`tt-cell-class-${period.id}-${cl}`} value={cl}>{cl}</option>
-                                      ))}
-                                    </select>
-                                  </div>
-
-                                  <div className="space-y-1">
-                                    <span className="block text-[10px] text-slate-400 font-bold">교사명</span>
-                                    <input
-                                      type="text"
-                                      value={cell.teacherName || ''}
-                                      placeholder="직접 입력"
-                                      onChange={(e) => updateTimetableCell(timetableDay, curRoom, period.id, 'teacherName', e.target.value)}
-                                      className="w-full p-2 text-xs border border-slate-200 rounded-lg bg-white"
-                                    />
-                                  </div>
-
-                                  <div className="space-y-1">
-                                    <span className="block text-[10px] text-slate-400 font-bold">사용 메모</span>
-                                    <input
-                                      type="text"
-                                      value={cell.memo || ''}
-                                      placeholder="활동 목적 등"
-                                      onChange={(e) => updateTimetableCell(timetableDay, curRoom, period.id, 'memo', e.target.value)}
-                                      className="w-full p-2 text-xs border border-slate-200 rounded-lg bg-white"
-                                    />
-                                  </div>
-                                </div>
-                              </div>
-                            );
-                          })}
-                        </div>
+                        {/* 실행 버튼 */}
+                        <button
+                          type="button"
+                          disabled={isExporting}
+                          onClick={handleExportCSV}
+                          className="w-full py-3 bg-indigo-600 hover:bg-indigo-750 disabled:bg-slate-300 disabled:hover:bg-slate-300 font-extrabold text-xs text-white rounded-xl transition-all flex items-center justify-center gap-1.5 shadow-sm"
+                        >
+                          {isExporting ? (
+                            <>
+                              <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                              데이터베이스 조회 및 파일 변환 중...
+                            </>
+                          ) : (
+                            <>
+                              <Download className="w-3.5 h-3.5" />
+                              지정 범위 CSV 파일 다운로드 받기
+                            </>
+                          )}
+                        </button>
                       </div>
                     )}
 
